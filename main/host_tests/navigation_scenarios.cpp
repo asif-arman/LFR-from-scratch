@@ -21,20 +21,14 @@ uint8_t kdX100 = 8;
 uint8_t baseSpeed = 160;
 uint16_t sensorThreshold = 400;
 uint8_t routePriority = PRIORITY_STRAIGHT_LEFT_RIGHT;
+bool boxMode = false;
 bool sensorCalibrationValid = true;
-uint16_t sensorThresholds[SENSOR_COUNT] = {};
+uint16_t sensorMinimums[SENSOR_COUNT] = {};
+uint16_t sensorMaximums[SENSOR_COUNT] = {};
 
 
-uint32_t millis()
-{
-  return simulatedMicros / 1000UL;
-}
-
-
-uint32_t micros()
-{
-  return simulatedMicros;
-}
+uint32_t millis() { return simulatedMicros / 1000UL; }
+uint32_t micros() { return simulatedMicros; }
 
 
 void moveLFR(int16_t left, int16_t right)
@@ -74,12 +68,24 @@ void readSensors(uint16_t values[])
 }
 
 
+uint16_t settingsBlackStrength(uint8_t sensor, uint16_t value)
+{
+  if (!sensorCalibrationValid)
+    return value > sensorThreshold ? 1000 : 0;
+  const uint16_t minimum = sensorMinimums[sensor];
+  const uint16_t maximum = sensorMaximums[sensor];
+  if (value <= minimum) return 0;
+  if (value >= maximum) return 1000;
+  return ((uint32_t)(value - minimum) * 1000UL) / (maximum - minimum);
+}
+
+
 uint16_t makeSensorPattern(const uint16_t values[])
 {
   uint16_t pattern = 0;
   for (uint8_t i = 0; i < SENSOR_COUNT; i++)
   {
-    if (values[i] > settingsThresholdForSensor(i))
+    if (settingsBlackStrength(i, values[i]) >= 500)
       pattern |= (uint16_t)1 << i;
   }
   return pattern;
@@ -138,48 +144,36 @@ RouteDirection settingsPriorityAt(uint8_t index)
 void settingsLoad() {}
 void settingsSaveIfChanged() {}
 void settingsUseGlobalThreshold() {}
-void settingsApplyCalibration(const uint16_t[]) {}
-uint16_t settingsThresholdForSensor(uint8_t) { return sensorThreshold; }
+void settingsApplyCalibration(const uint16_t[], const uint16_t[]) {}
+uint16_t settingsThresholdForSensor(uint8_t sensor)
+{
+  return (sensorMinimums[sensor] + sensorMaximums[sensor]) / 2;
+}
 
 
-static NavigationResult tickFrame(const uint16_t frame[],
-                                  uint16_t extraMs = 0)
+static NavigationResult tickFrame(const uint16_t frame[])
 {
   for (uint8_t i = 0; i < SENSOR_COUNT; i++) sensorFrame[i] = frame[i];
   uint16_t values[SENSOR_COUNT] = {};
   const NavigationResult result = navigationTick(values);
   if (CONTROL_PERIOD_US > HOST_SENSOR_FRAME_US)
     simulatedMicros += CONTROL_PERIOD_US - HOST_SENSOR_FRAME_US;
-  simulatedMicros += (uint32_t)extraMs * 1000UL;
-  assert(result == NAVIGATION_ACTIVE);
   return result;
 }
 
 
-static NavigationResult tick(uint16_t pattern, uint16_t extraMs = 0)
+static NavigationResult tick(uint16_t pattern)
 {
   uint16_t frame[SENSOR_COUNT];
   for (uint8_t i = 0; i < SENSOR_COUNT; i++)
     frame[i] = (pattern & ((uint16_t)1 << i)) ? 850 : 100;
-  return tickFrame(frame, extraMs);
+  return tickFrame(frame);
 }
 
 
-static void resetScenario()
+static void repeat(uint16_t pattern, uint16_t count)
 {
-  simulatedMicros = 0;
-  for (uint8_t i = 0; i < SENSOR_COUNT; i++) sensorFrame[i] = 100;
-  commandedLeft = 0;
-  commandedRight = 0;
-  brakeWasCalled = false;
-  kpX100 = 30;
-  kdX100 = 8;
-  baseSpeed = 160;
-  routePriority = PRIORITY_STRAIGHT_LEFT_RIGHT;
-  motorDirectionGuardReset(hostLeftGuard);
-  motorDirectionGuardReset(hostRightGuard);
-  navigationStart();
-  stopCallCount = 0;
+  while (count-- != 0) tick(pattern);
 }
 
 
@@ -195,330 +189,294 @@ static void fillFrame(uint16_t frame[], uint16_t value)
 }
 
 
-static void observeWideThen(uint16_t exitPattern)
+static void resetScenario(bool enableBoxMode = false)
 {
-  tick(ALL_SENSOR_MASK);
-  tick(ALL_SENSOR_MASK);
-  tick(exitPattern);
+  simulatedMicros = 0;
+  fillFrame(sensorFrame, 100);
+  commandedLeft = 0;
+  commandedRight = 0;
+  brakeWasCalled = false;
+  stopCallCount = 0;
+  kpX100 = 30;
+  kdX100 = 8;
+  baseSpeed = 160;
+  routePriority = PRIORITY_STRAIGHT_LEFT_RIGHT;
+  boxMode = enableBoxMode;
+  sensorCalibrationValid = true;
+  for (uint8_t i = 0; i < SENSOR_COUNT; i++)
+  {
+    sensorMinimums[i] = 100;
+    sensorMaximums[i] = 850;
+  }
+  motorDirectionGuardReset(hostLeftGuard);
+  motorDirectionGuardReset(hostRightGuard);
+  navigationStart();
+  stopCallCount = 0;
 }
 
 
-static void finishNarrowConfirmation(uint16_t narrow)
+static void clearStartAndArmFinish(uint16_t centered)
 {
-  tick(narrow);
-  tick(narrow);
-}
-
-
-static void verifyAngledLoss(bool left, uint8_t outerSensor)
-{
-  resetScenario();
-  tick(oneSensor(left ? 7 : 6));
-  tick(oneSensor(left ? 8 : 5));
-  tick(oneSensor(outerSensor));
-  assert(outwardTrendCount >= TURN_OUTWARD_CONFIRM);
-  assert(commandedLeft < baseSpeed || commandedRight < baseSpeed);
-
-  tick(0);
-  assert(state == STATE_TURN_TO_ROUTE && !brakeWasCalled &&
-         stopCallCount == 1);
-  tick(0);
-  if (left)
-  {
-    assert(commandedLeft < 0 && commandedRight > 0);
-  }
-  else
-  {
-    assert(commandedLeft > 0 && commandedRight < 0);
-  }
+  repeat(ALL_SENSOR_MASK, 3);
+  repeat(centered, START_EXIT_CONFIRM_TICKS);
+  assert(startCleared && state == STATE_FOLLOW && !finishArmed);
+  repeat(centered, FINISH_ARM_TICKS);
+  assert(finishArmed);
 }
 
 
 int main()
 {
   const uint16_t centered = oneSensor(6) | oneSensor(7);
+  const uint16_t leftLine = oneSensor(9);
+  const uint16_t rightLine = oneSensor(4);
   const uint16_t inverseEntry = ALL_SENSOR_MASK ^ centered;
-  const uint16_t leftAndStraight = 0x3FC0;
 
-  // Real analog strengths move the PD error gradually within one binary group.
+  // Endpoint normalization clamps and scales without floating point.
+  resetScenario();
+  assert(settingsBlackStrength(0, 0) == 0);
+  assert(settingsBlackStrength(0, 100) == 0);
+  assert(settingsBlackStrength(0, 475) == 500);
+  assert(settingsBlackStrength(0, 850) == 1000);
+  assert(settingsBlackStrength(0, 1023) == 1000);
+
+  // Centered, left and right errors drive analog-weighted PD correctly.
+  resetScenario();
+  assert(tick(centered) == NAVIGATION_ACTIVE);
+  assert(commandedLeft == baseSpeed && commandedRight == baseSpeed);
+  resetScenario();
+  tick(leftLine);
+  assert(previousError < 0 && commandedLeft < commandedRight);
+  resetScenario();
+  tick(rightLine);
+  assert(previousError > 0 && commandedLeft > commandedRight);
+
+  // Analog centroid moves smoothly within one unchanged binary group.
   resetScenario();
   kdX100 = 0;
   uint16_t analogFrame[SENSOR_COUNT];
   fillFrame(analogFrame, 100);
-  analogFrame[5] = 450;
-  analogFrame[6] = 900;
-  tickFrame(analogFrame);
-  const int16_t firstError = previousError;
-  const int16_t firstLeft = commandedLeft;
-  const int16_t firstRight = commandedRight;
-  analogFrame[5] = 550;
+  analogFrame[5] = 500;
   analogFrame[6] = 850;
   tickFrame(analogFrame);
-  const int16_t secondError = previousError;
-  const int16_t secondLeft = commandedLeft;
-  const int16_t secondRight = commandedRight;
+  const int16_t firstError = previousError;
   analogFrame[5] = 650;
   analogFrame[6] = 750;
   tickFrame(analogFrame);
-  assert(firstError < secondError && secondError < previousError);
-  assert(firstLeft < secondLeft && secondLeft < commandedLeft);
-  assert(firstRight > secondRight && secondRight > commandedRight);
-  assert(commandedLeft - secondLeft <= FOLLOW_PWM_SLEW_STEP);
-  assert(secondRight - commandedRight <= FOLLOW_PWM_SLEW_STEP);
+  assert(previousError > firstError);
 
-  // A centred line stays equal and never pulses or stops.
+  // Absolute error reduces average speed; FOLLOW slew never enters dead zone.
   resetScenario();
-  fillFrame(analogFrame, 100);
-  analogFrame[6] = 850;
-  analogFrame[7] = 850;
-  tickFrame(analogFrame);
-  assert(commandedLeft == baseSpeed && commandedRight == baseSpeed);
-  for (uint8_t frame = 0; frame < 5; frame++)
-  {
-    tickFrame(analogFrame);
-    assert(commandedLeft == baseSpeed && commandedRight == baseSpeed);
-  }
-  assert(navigationWorstSensorFrameMicros() == HOST_SENSOR_FRAME_US);
-  assert(navigationWorstControlTickMicros() == HOST_SENSOR_FRAME_US);
-  assert(navigationWorstControlTickMicros() <= CONTROL_PERIOD_US);
-
-  // Hard curves can coast the inside wheel; corner slowdown keeps authority.
-  resetScenario();
-  kpX100 = 70;
-  kdX100 = 0;
+  kpX100 = 0;
   tick(centered);
-  for (uint8_t frame = 0; frame < 8; frame++) tick(oneSensor(0));
-  assert(commandedLeft == 255 && commandedRight == 0);
-  int16_t previousApplied = commandedRight;
-  for (uint8_t frame = 0; frame < 3; frame++)
-  {
-    tick(centered);
-    assert(commandedRight - previousApplied <= FOLLOW_PWM_SLEW_STEP);
-    previousApplied = commandedRight;
-  }
-  assert(commandedRight >= RIGHT_MOTOR_EFFECTIVE_MIN_PWM);
+  const int16_t centeredTotal = commandedLeft + commandedRight;
+  tick(leftLine);
+  assert(commandedLeft + commandedRight < centeredTotal);
+  assert((commandedLeft == 0 || commandedLeft >= LEFT_MOTOR_EFFECTIVE_MIN_PWM));
+  assert((commandedRight == 0 || commandedRight >= RIGHT_MOTOR_EFFECTIVE_MIN_PWM));
+  assert(slewFollowPwm(0, 160, 90) == 90);
+  assert(slewFollowPwm(90, 0, 90) == 0);
+  assert(slewFollowPwm(152, 0, 90) == 116);
 
-  resetScenario();
-  kpX100 = 70;
-  kdX100 = 0;
-  tick(oneSensor(6));
-  tick(oneSensor(5));
-  followMixerValid = false;
-  tick(oneSensor(3));
-  assert(outwardTrendCount >= TURN_OUTWARD_CONFIRM);
-  assert(commandedLeft == 255 && commandedRight == 0);
-
-  // NORMAL and INVERSE analog weighting produce symmetric steering.
+  // A short gap retains bounded steering and confirms the full-array return.
   resetScenario();
   kdX100 = 0;
-  fillFrame(analogFrame, 100);
-  analogFrame[5] = 650;
-  analogFrame[6] = 850;
-  tickFrame(analogFrame);
-  const int16_t normalLeft = commandedLeft;
-  const int16_t normalRight = commandedRight;
-  const int16_t normalError = previousError;
-
-  resetScenario();
-  kdX100 = 0;
-  lineIsInverse = true;
-  fillFrame(analogFrame, 850);
-  analogFrame[5] = 240;
-  analogFrame[6] = 111;
-  tickFrame(analogFrame);
-  assert(absoluteError(previousError - normalError) <= 2);
-  assert(absoluteError(commandedLeft - normalLeft) <= 2);
-  assert(absoluteError(commandedRight - normalRight) <= 2);
-
-  // One continuous curved/diagonal group never accumulates junction votes.
-  resetScenario();
-  const uint16_t continuousDiagonal = 0x01F0;
-  for (uint8_t frame = 0; frame < 6; frame++)
-  {
-    tick(continuousDiagonal);
-    assert(state == STATE_FOLLOW && !junctionActive &&
-           junctionFrameCount == 0);
-  }
-
-  // A separated sub-wide branch pattern still uses the existing vote path.
-  resetScenario();
-  const uint16_t separatedBranch = oneSensor(4) | oneSensor(5) | oneSensor(7);
-  tick(separatedBranch);
-  tick(separatedBranch);
-  tick(separatedBranch);
-  assert(junctionActive);
-  assert(junctionAvailableRoutes == (ROUTE_STRAIGHT | ROUTE_RIGHT));
-
-  // Existing main(5)-style route evidence: T, cross, and three-way.
-  resetScenario();
-  observeWideThen(0);
-  simulatedMicros += (uint32_t)PROBE_BRAKE_HOLD_MS * 1000UL;
+  tick(leftLine);
+  const bool wasTurningLeft = commandedLeft < commandedRight;
   tick(0);
-  assert(junctionAvailableRoutes == (ROUTE_LEFT | ROUTE_RIGHT));
+  assert(state == STATE_FORWARD_PROBE && probeReason == PROBE_LOST_LINE);
+  assert((gapProbeLeft < gapProbeRight) == wasTurningLeft);
+  assert(absoluteError(gapProbeLeft - gapProbeRight) <= GAP_STEERING_MAX_DELTA);
+  tick(leftLine);
+  assert(state == STATE_FORWARD_PROBE);
+  repeat(leftLine, LINE_CONFIRM_TICKS - 1);
+  assert(state == STATE_FOLLOW);
+
+  // Multiple dotted gaps are independently crossed without stopping.
+  repeat(centered, 2);
+  for (uint8_t gap = 0; gap < 3; gap++)
+  {
+    repeat(0, 2);
+    repeat(centered, LINE_CONFIRM_TICKS);
+    assert(state == STATE_FOLLOW && terminalResult == NAVIGATION_ACTIVE);
+  }
+
+  // Persistent loss goes directly to a signed, history-directed U-turn.
+  resetScenario();
+  tick(leftLine);
+  tick(0);
+  repeat(0, LOSS_PROBE_TICKS);
+  assert(state == STATE_U_TURN);
+  tick(0);
+  tick(0); // lets the 2.5 ms common reversal guard expire
+  assert(commandedLeft < 0 && commandedRight > 0);
+  assert(commandedLeft == -UTURN_PWM && commandedRight == UTURN_PWM);
+
+  // The original center line is ignored before the U-turn minimum guard.
+  resetScenario();
+  beginUTurn();
+  repeat(centered, UTURN_MIN_TICKS - 1);
+  assert(state == STATE_U_TURN);
+  tick(centered);
+  assert(state == STATE_U_TURN && centerStableCount == 1);
+  tick(centered);
+  assert(state == STATE_FOLLOW);
+
+  // An unsuccessful U-turn has one bounded timeout and a terminal lost result.
+  resetScenario();
+  beginUTurn();
+  repeat(0, UTURN_TIMEOUT_TICKS - 1);
+  assert(state == STATE_U_TURN);
+  assert(tick(0) == NAVIGATION_LOST);
+  assert(state == STATE_STOPPED && commandedLeft == 0 && commandedRight == 0);
+  assert(tick(0) == NAVIGATION_LOST);
+
+  // BOX OFF keeps both inverse transitions and never treats full black as finish.
+  resetScenario(false);
+  tick(centered);
+  tick(inverseEntry);
+  tick(inverseEntry);
+  assert(lineIsInverse && state == STATE_FOLLOW);
+  inverseCooldownTicks = INVERSE_COOLDOWN_TICKS;
+  tick(centered);
+  tick(centered);
+  assert(!lineIsInverse && state == STATE_FOLLOW);
+  resetScenario(false);
+  repeat(ALL_SENSOR_MASK, FINISH_CONFIRM_TICKS + 4);
+  assert(terminalResult == NAVIGATION_ACTIVE && state != STATE_STOPPED);
+
+  // BOX ON isolates the start box from junction/loss/finish logic.
+  resetScenario(true);
+  assert(state == STATE_START_BOX && !startCleared && !lineIsInverse);
+  repeat(ALL_SENSOR_MASK, FINISH_CONFIRM_TICKS + 3);
+  assert(state == STATE_START_BOX && !junctionActive && !finishArmed);
+  repeat(centered, START_EXIT_CONFIRM_TICKS);
+  assert(startCleared && state == STATE_FOLLOW);
+
+  // Starting directly on the outgoing line is also valid.
+  resetScenario(true);
+  repeat(centered, START_EXIT_CONFIRM_TICKS);
+  assert(startCleared && state == STATE_FOLLOW);
+  repeat(inverseEntry, INVERSE_CONFIRM_TICKS + 2);
+  assert(!lineIsInverse); // inverse processing is disabled for this run
+
+  // Finish arms only after ordinary travel; a brief cross cannot finish.
+  resetScenario(true);
+  clearStartAndArmFinish(centered);
+  repeat(ALL_SENSOR_MASK, FINISH_CONFIRM_TICKS - 2);
+  repeat(centered, LINE_CONFIRM_TICKS + JUNCTION_EXIT_CONFIRM_TICKS);
+  assert(terminalResult == NAVIGATION_ACTIVE && state != STATE_STOPPED);
+
+  // A persistent near-full box after arming produces the terminal result.
+  resetScenario(true);
+  clearStartAndArmFinish(centered);
+  NavigationResult finishResult = NAVIGATION_ACTIVE;
+  for (uint8_t i = 0; i < FINISH_CONFIRM_TICKS; i++)
+    finishResult = tick(ALL_SENSOR_MASK);
+  assert(finishResult == NAVIGATION_FINISHED);
+  assert(state == STATE_STOPPED && commandedLeft == 0 && commandedRight == 0);
+
+  // Explicit route turns use signed pivot constants in both directions.
+  resetScenario();
+  junctionIncomingCentered = false;
+  junctionIncomingError = -300;
+  startJunction(ROUTE_LEFT | ROUTE_STRAIGHT);
+  assert(selectedRoute == ROUTE_LEFT && state == STATE_TURN_TO_ROUTE);
+  tick(0);
+  assert(commandedLeft == -TURN_PWM && commandedRight == TURN_PWM);
+  resetScenario();
+  junctionIncomingCentered = false;
+  junctionIncomingError = 300;
+  startJunction(ROUTE_RIGHT | ROUTE_STRAIGHT);
+  tick(0);
+  assert(commandedLeft == TURN_PWM && commandedRight == -TURN_PWM);
+
+  // Centered continuity prefers straight; angled continuity prefers its side.
+  resetScenario();
+  junctionIncomingCentered = true;
+  junctionIncomingError = 0;
+  startJunction(ROUTE_LEFT | ROUTE_STRAIGHT | ROUTE_RIGHT);
+  assert(selectedRoute == ROUTE_STRAIGHT);
+  resetScenario();
+  junctionIncomingCentered = false;
+  junctionIncomingError = -250;
+  startJunction(ROUTE_LEFT | ROUTE_STRAIGHT | ROUTE_RIGHT);
   assert(selectedRoute == ROUTE_LEFT);
 
-  resetScenario();
-  observeWideThen(centered);
-  finishNarrowConfirmation(centered);
-  assert(junctionAvailableRoutes ==
-         (ROUTE_LEFT | ROUTE_STRAIGHT | ROUTE_RIGHT));
-
-  resetScenario();
-  tick(leftAndStraight);
-  tick(leftAndStraight);
-  tick(centered);
-  finishNarrowConfirmation(centered);
-  assert(junctionAvailableRoutes == (ROUTE_LEFT | ROUTE_STRAIGHT));
-
-  // Every EEPROM priority order selects its first actually detected cross route.
+  // If continuity is ambiguous, every configured priority picks its first exit.
   for (uint8_t priority = 0; priority < ROUTE_PRIORITY_COUNT; priority++)
   {
     resetScenario();
     routePriority = priority;
-    const RouteDirection expected = settingsPriorityAt(0);
-    observeWideThen(centered);
-    finishNarrowConfirmation(centered);
-    assert(selectedRoute == expected);
-    assert(junctionActive);
+    junctionIncomingCentered = false;
+    junctionIncomingError = 0;
+    startJunction(ROUTE_LEFT | ROUTE_STRAIGHT | ROUTE_RIGHT);
+    assert(selectedRoute == settingsPriorityAt(0));
   }
 
-  // NORMAL -> INVERSE survives the temporary wide probe; cross never toggles.
+  // Sensor-driven left T, right T, three-way/cross classification.
+  const uint16_t leftAndStraight = 0x3FC0;
+  const uint16_t rightAndStraight = 0x00FF;
   resetScenario();
   tick(centered);
-  simulatedMicros += (uint32_t)INVERSE_TOGGLE_COOLDOWN_MS * 1000UL;
-  tick(inverseEntry);
-  assert(state == STATE_FORWARD_PROBE && !lineIsInverse);
-  tick(inverseEntry);
-  assert(lineIsInverse && state == STATE_FOLLOW);
-  assert(commandedLeft > 0 && commandedRight > 0);
-
-  simulatedMicros += (uint32_t)INVERSE_TOGGLE_COOLDOWN_MS * 1000UL;
-  tick(centered);
-  tick(centered);
-  assert(!lineIsInverse && state == STATE_FOLLOW);
-
-  resetScenario();
-  simulatedMicros += (uint32_t)INVERSE_TOGGLE_COOLDOWN_MS * 1000UL;
-  tick(ALL_SENSOR_MASK);
-  tick(ALL_SENSOR_MASK);
-  assert(!lineIsInverse);
-
-  // Stable centred loss remains dotted/gap handling; outward loss turns now.
+  repeat(leftAndStraight, 2);
+  repeat(centered, LINE_CONFIRM_TICKS);
+  assert(junctionAvailableRoutes == (ROUTE_LEFT | ROUTE_STRAIGHT));
   resetScenario();
   tick(centered);
-  tick(centered);
-  tick(centered);
-  tick(0);
-  assert(state == STATE_FORWARD_PROBE && probeReason == PROBE_LOST_LINE);
-
-  // Lost-line confirmation stays in motion and retains all confirmation reads.
-  brakeWasCalled = false;
-  tick(centered);
-  assert(state == STATE_FORWARD_PROBE);
-  assert(commandedLeft > 0 && commandedRight > 0 && !brakeWasCalled &&
-         stopCallCount == 0);
-  tick(centered);
-  assert(state == STATE_FORWARD_PROBE);
-  tick(centered);
-  assert(state == STATE_FOLLOW && commandedLeft > 0 &&
-         commandedRight > 0 && stopCallCount == 0);
-
-  verifyAngledLoss(false, 3);
-  verifyAngledLoss(true, 10);
-  verifyAngledLoss(false, 2);
-  verifyAngledLoss(true, 11);
-  verifyAngledLoss(false, 1);
-  verifyAngledLoss(true, 12);
-  verifyAngledLoss(false, 0);
-  verifyAngledLoss(true, 13);
-
-  // Expected-side reacquisition slows; centre confirms moving for two reads.
+  repeat(rightAndStraight, 2);
+  repeat(centered, LINE_CONFIRM_TICKS);
+  assert(junctionAvailableRoutes == (ROUTE_RIGHT | ROUTE_STRAIGHT));
   resetScenario();
-  tick(oneSensor(6));
-  tick(oneSensor(5));
-  tick(oneSensor(3));
-  tick(0);
-  simulatedMicros += (uint32_t)TURN_MINIMUM_MS * 1000UL;
-  tick(oneSensor(3));
-  assert(commandedLeft == TURN_REACQUIRE_PWM &&
-         commandedRight == -TURN_REACQUIRE_PWM);
-  const uint16_t stopsBeforeTurnCenter = stopCallCount;
   tick(centered);
-  assert(state == STATE_TURN_TO_ROUTE &&
-         commandedLeft > 0 && commandedRight == 0);
-  tick(centered);
-  assert(state == STATE_ROUTE_COMMIT && commandedLeft > 0 &&
-         commandedRight > 0 && stopCallCount == stopsBeforeTurnCenter);
-
-  // Reverse and recovery search hand a narrow line directly to moving confirm.
-  resetScenario();
-  beginReverse();
-  tick(centered);
-  assert(state == STATE_RECOVERY_SEARCH && commandedLeft > 0 &&
-         commandedRight > 0 && stopCallCount == 0);
-  tick(centered);
-  assert(state == STATE_FOLLOW && commandedLeft > 0 &&
-         commandedRight > 0 && stopCallCount == 0);
-
-  resetScenario();
-  beginRecoverySearch();
-  stopCallCount = 0;
-  tick(centered);
-  assert(state == STATE_RECOVERY_SEARCH && commandedLeft > 0 &&
-         commandedRight > 0);
-  tick(centered);
-  assert(state == STATE_FOLLOW && commandedLeft > 0 &&
-         commandedRight > 0 && stopCallCount == 0);
-
-  // If a right pivot crosses centre, correction reverses gently.
-  resetScenario();
-  beginTurn(ROUTE_RIGHT);
-  turnSawCenterLost = true;
-  tick(oneSensor(9), TURN_MINIMUM_MS);
-  tick(oneSensor(9));
-  assert(commandedLeft == -TURN_CROSS_CORRECTION_PWM &&
-         commandedRight == TURN_CROSS_CORRECTION_PWM);
-
-  // A true sign reversal coasts first, then applies after the shared guard.
-  resetScenario();
-  moveLFR(-120, 120);
-  assert(commandedLeft == -120 && commandedRight == 120);
-  moveLFR(115, 115);
-  assert(commandedLeft == 0 && commandedRight == 115);
-  simulatedMicros += MOTOR_DIRECTION_GUARD_US;
-  moveLFR(115, 115);
-  assert(commandedLeft == 115 && commandedRight == 115);
-
-  // A persistent filled area crawls, then exits without a finish/safety stop.
-  resetScenario();
-  tick(ALL_SENSOR_MASK, FORWARD_PROBE_WINDOW_MS);
-  tick(ALL_SENSOR_MASK);
-  assert(state == STATE_FORWARD_PROBE && wideAreaCrawl);
-  assert(commandedLeft == WIDE_AREA_CRAWL_PWM &&
-         commandedRight == WIDE_AREA_CRAWL_PWM);
-  const uint8_t latchedLeftVotes = leftRouteVotes;
-  const uint8_t latchedRightVotes = rightRouteVotes;
-  for (uint8_t frame = 0; frame < 6; frame++) tick(ALL_SENSOR_MASK);
-  assert(leftRouteVotes == latchedLeftVotes &&
-         rightRouteVotes == latchedRightVotes);
-  finishNarrowConfirmation(centered);
-  tick(centered);
-  assert(state != STATE_STOPPED && junctionActive);
+  repeat(ALL_SENSOR_MASK, 2);
+  repeat(centered, LINE_CONFIRM_TICKS);
   assert(junctionAvailableRoutes ==
          (ROUTE_LEFT | ROUTE_STRAIGHT | ROUTE_RIGHT));
 
-  // Turn/recovery timeouts alternate reverse and search indefinitely.
+  // Left/right T patterns and a separated angled crossing accumulate routes.
   resetScenario();
-  beginTurn(ROUTE_U_TURN);
-  simulatedMicros += (uint32_t)U_TURN_TIMEOUT_MS * 1000UL;
-  tick(0);
-  assert(state == STATE_REVERSE_REACQUIRE);
-  simulatedMicros += (uint32_t)RECOVERY_REVERSE_TIMEOUT_MS * 1000UL;
-  tick(0);
-  assert(state == STATE_RECOVERY_SEARCH);
-  simulatedMicros += (uint32_t)TURN_SEARCH_TIMEOUT_MS * 1000UL;
-  tick(0);
-  assert(state == STATE_REVERSE_REACQUIRE);
+  junctionIncomingCentered = false;
+  junctionIncomingError = 0;
+  startJunction(ROUTE_LEFT | ROUTE_STRAIGHT);
+  assert((junctionAvailableRoutes & (ROUTE_LEFT | ROUTE_STRAIGHT)) ==
+         (ROUTE_LEFT | ROUTE_STRAIGHT));
+  resetScenario();
+  startJunction(ROUTE_RIGHT | ROUTE_STRAIGHT);
+  assert((junctionAvailableRoutes & (ROUTE_RIGHT | ROUTE_STRAIGHT)) ==
+         (ROUTE_RIGHT | ROUTE_STRAIGHT));
+  resetScenario();
+  const uint16_t separated = oneSensor(4) | oneSensor(5) | oneSensor(7);
+  repeat(separated, JUNCTION_CONFIRM_TICKS);
+  assert(junctionActive &&
+         junctionAvailableRoutes == (ROUTE_RIGHT | ROUTE_STRAIGHT));
+
+  // A route rearms after stable narrow exit, allowing a nearby junction.
+  resetScenario();
+  junctionIncomingCentered = true;
+  startJunction(ROUTE_STRAIGHT | ROUTE_LEFT);
+  assert(state == STATE_ROUTE_COMMIT);
+  repeat(centered, JUNCTION_EXIT_CONFIRM_TICKS);
+  assert(state == STATE_FOLLOW && !junctionActive);
+  repeat(separated, JUNCTION_CONFIRM_TICKS);
+  assert(junctionActive);
+
+  // The common motor guard still inserts a precise zero interval on reversal.
+  resetScenario();
+  moveLFR(-TURN_PWM, TURN_PWM);
+  assert(commandedLeft == -TURN_PWM && commandedRight == TURN_PWM);
+  moveLFR(TURN_PWM, -TURN_PWM);
+  assert(commandedLeft == 0 && commandedRight == 0);
+  simulatedMicros += MOTOR_DIRECTION_GUARD_US;
+  moveLFR(TURN_PWM, -TURN_PWM);
+  assert(commandedLeft == TURN_PWM && commandedRight == -TURN_PWM);
+
+  // The measured host sensor/control work remains inside one control period.
+  resetScenario();
+  repeat(centered, 5);
+  assert(navigationWorstSensorFrameMicros() == HOST_SENSOR_FRAME_US);
+  assert(navigationWorstControlTickMicros() == HOST_SENSOR_FRAME_US);
+  assert(navigationWorstControlTickMicros() <= CONTROL_PERIOD_US);
 
   std::cout << "navigation scenarios passed; sensor/control "
             << navigationWorstSensorFrameMicros() << "/"

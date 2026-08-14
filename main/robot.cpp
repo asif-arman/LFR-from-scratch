@@ -22,7 +22,7 @@ uint16_t makeSensorPattern(
       i++
   )
   {
-    if (values[i] > settingsThresholdForSensor(i))
+    if (settingsBlackStrength(i, values[i]) >= 500)
     {
       pattern |= (uint16_t)1 << i;
     }

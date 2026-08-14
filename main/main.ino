@@ -130,7 +130,15 @@ void loop()
       return;
     }
 
-    navigationTick(sensorValues);
+    const NavigationResult result = navigationTick(sensorValues);
+    if (result == NAVIGATION_FINISHED || result == NAVIGATION_LOST)
+    {
+      stopMotors();
+      if (result == NAVIGATION_FINISHED) uiShowRunFinished();
+      else uiShowLineLost();
+      appMode = APP_RESULT;
+      modeStartedAt = now;
+    }
     return;
   }
 
@@ -146,7 +154,8 @@ void loop()
     if (result != CALIBRATION_RUNNING)
     {
       stopMotors();
-      uiShowCalibrationResult(result == CALIBRATION_SUCCEEDED);
+      uiShowCalibrationResult(result == CALIBRATION_SUCCEEDED,
+                              calibrationFailedSensor());
       appMode = APP_RESULT;
       modeStartedAt = now;
     }

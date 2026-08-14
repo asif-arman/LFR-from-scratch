@@ -24,8 +24,10 @@ void uiDrawSensorPattern(uint16_t pattern);
 
 void uiShowPlacement();
 void uiShowRunning();
+void uiShowRunFinished();
+void uiShowLineLost();
 void uiShowCalibration();
-void uiShowCalibrationResult(bool succeeded);
+void uiShowCalibrationResult(bool succeeded, uint8_t failedSensor = 0xFF);
 void uiShowMotorTest();
 void uiShowMotorTestComplete();
 void uiReturnToMain();

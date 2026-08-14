@@ -37,6 +37,7 @@ enum TuningItem : uint8_t
   TUNE_SPEED,
   TUNE_THRESHOLD,
   TUNE_ROUTE_PRIORITY,
+  TUNE_BOX_MODE,
   TUNE_CALIBRATE,
   TUNE_MOTOR_TEST,
   TUNING_ITEM_COUNT
@@ -135,7 +136,7 @@ static void drawTuningLabel(uint8_t item, uint8_t row)
       oled.print(baseSpeed);
       break;
     case TUNE_THRESHOLD:
-      oled.print(F("THRESH"));
+      oled.print(F("FALLBACK"));
       oled.setCursor(12, row);
       oled.print(sensorThreshold);
       break;
@@ -143,6 +144,11 @@ static void drawTuningLabel(uint8_t item, uint8_t row)
       oled.print(F("ROUTE"));
       oled.setCursor(10, row);
       printPriority(routePriority);
+      break;
+    case TUNE_BOX_MODE:
+      oled.print(F("BOX MODE"));
+      oled.setCursor(12, row);
+      oled.print(boxMode ? F("ON") : F("OFF"));
       break;
     case TUNE_CALIBRATE:
       oled.print(F("CALIBRATE"));
@@ -182,6 +188,7 @@ static uint16_t getSelectedValue()
     case TUNE_SPEED: return baseSpeed;
     case TUNE_THRESHOLD: return sensorThreshold;
     case TUNE_ROUTE_PRIORITY: return routePriority;
+    case TUNE_BOX_MODE: return boxMode;
     default: return 0;
   }
 }
@@ -196,6 +203,7 @@ static void setSelectedValue(uint16_t value)
     case TUNE_SPEED: baseSpeed = value; break;
     case TUNE_THRESHOLD: sensorThreshold = value; break;
     case TUNE_ROUTE_PRIORITY: routePriority = value; break;
+    case TUNE_BOX_MODE: boxMode = value != 0; break;
   }
 }
 
@@ -220,13 +228,20 @@ static void drawEditScreen()
       printRouteName(settingsPriorityAt(rank));
     }
   }
+  else if (tuningItem == TUNE_BOX_MODE)
+  {
+    oled.print(F("BOX MODE"));
+    oled.setCursor(0, 2);
+    oled.print(F("VALUE: "));
+    oled.print(boxMode ? F("ON") : F("OFF"));
+  }
   else
   {
     oled.print(F("EDIT "));
     if (tuningItem == TUNE_KP) oled.print(F("KP"));
     else if (tuningItem == TUNE_KD) oled.print(F("KD"));
     else if (tuningItem == TUNE_SPEED) oled.print(F("SPEED"));
-    else oled.print(F("THRESHOLD"));
+    else oled.print(F("FALLBACK THR"));
 
     oled.setCursor(0, 2);
     oled.print(F("VALUE: "));
@@ -252,6 +267,8 @@ static void increaseSelectedValue()
     sensorThreshold = sensorThreshold <= 1013 ? sensorThreshold + 10 : 1023;
   else if (tuningItem == TUNE_ROUTE_PRIORITY)
     routePriority = (routePriority + 1) % ROUTE_PRIORITY_COUNT;
+  else if (tuningItem == TUNE_BOX_MODE)
+    boxMode = !boxMode;
 }
 
 
@@ -266,6 +283,8 @@ static void decreaseSelectedValue()
   else if (tuningItem == TUNE_ROUTE_PRIORITY)
     routePriority = routePriority == 0 ? ROUTE_PRIORITY_COUNT - 1 :
                                         routePriority - 1;
+  else if (tuningItem == TUNE_BOX_MODE)
+    boxMode = !boxMode;
 }
 
 
@@ -490,6 +509,18 @@ void uiShowRunning()
 }
 
 
+void uiShowRunFinished()
+{
+  showStatus(F("RUN FINISHED"), F("MOTORS STOPPED"));
+}
+
+
+void uiShowLineLost()
+{
+  showStatus(F("LINE LOST"), F("MOTORS STOPPED"));
+}
+
+
 void uiShowCalibration()
 {
   showStatus(F("CALIBRATION"), F("PLACE: 2 SEC"));
@@ -498,10 +529,16 @@ void uiShowCalibration()
 }
 
 
-void uiShowCalibrationResult(bool succeeded)
+void uiShowCalibrationResult(bool succeeded, uint8_t failedSensor)
 {
   showStatus(succeeded ? F("CAL SAVED") : F("CAL FAILED"),
              succeeded ? F("EEPROM UPDATED") : F("CHECK ALL SENS"));
+  if (!succeeded && failedSensor < SENSOR_COUNT)
+  {
+    oled.setCursor(0, 4);
+    oled.print(F("CHECK SENSOR S"));
+    oled.print(failedSensor);
+  }
 }
 
 

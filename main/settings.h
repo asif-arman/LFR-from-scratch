@@ -49,8 +49,13 @@ extern uint16_t sensorThreshold;
 // is selected first. Change it to match the required course strategy.
 extern uint8_t routePriority;
 
+// Default: OFF. When enabled, RUN treats broad black regions as start/finish
+// boxes and disables inverse-line detection for the entire run.
+extern bool boxMode;
+
 extern bool sensorCalibrationValid;
-extern uint16_t sensorThresholds[SENSOR_COUNT];
+extern uint16_t sensorMinimums[SENSOR_COUNT];
+extern uint16_t sensorMaximums[SENSOR_COUNT];
 
 
 // Load a validated EEPROM record or restore safe defaults.
@@ -62,11 +67,15 @@ void settingsSaveIfChanged();
 // Use the global threshold again after the user edits THRESH.
 void settingsUseGlobalThreshold();
 
-// Install and persist new per-sensor midpoint thresholds.
-void settingsApplyCalibration(const uint16_t thresholds[]);
+// Install and persist measured per-sensor calibration endpoints.
+void settingsApplyCalibration(const uint16_t minimums[],
+                              const uint16_t maximums[]);
 
 // Return the threshold currently used for one sensor.
 uint16_t settingsThresholdForSensor(uint8_t sensorIndex);
+
+// Normalize one raw reading to black strength in the range 0..1000.
+uint16_t settingsBlackStrength(uint8_t sensorIndex, uint16_t value);
 
 // Read one of the three directions in the selected priority order.
 RouteDirection settingsPriorityAt(uint8_t index);

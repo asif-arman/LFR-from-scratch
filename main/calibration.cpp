@@ -41,10 +41,10 @@ enum CalibrationPhase : uint8_t
 static const int8_t SWEEP_DIRECTIONS[4] PROGMEM = { -1, 1, 1, -1 };
 static uint16_t minimumValues[SENSOR_COUNT];
 static uint16_t maximumValues[SENSOR_COUNT];
-static uint16_t newThresholds[SENSOR_COUNT];
 static CalibrationPhase phase = CAL_PHASE_IDLE;
 static uint32_t phaseStartedAt = 0;
 static uint8_t sweepIndex = 0;
+static uint8_t failedSensor = 0xFF;
 
 
 void calibrationStart()
@@ -57,6 +57,7 @@ void calibrationStart()
   }
 
   sweepIndex = 0;
+  failedSensor = 0xFF;
   phase = CAL_PHASE_PLACEMENT;
   phaseStartedAt = millis();
 }
@@ -127,17 +128,22 @@ CalibrationResult calibrationTick(uint16_t sensorValues[])
     {
       if (maximumValues[i] - minimumValues[i] < CALIBRATION_MIN_RANGE)
       {
+        failedSensor = i;
         phase = CAL_PHASE_DONE;
         return CALIBRATION_FAILED;
       }
-      newThresholds[i] =
-          (maximumValues[i] + minimumValues[i]) / 2;
     }
 
-    settingsApplyCalibration(newThresholds);
+    settingsApplyCalibration(minimumValues, maximumValues);
     phase = CAL_PHASE_DONE;
     return CALIBRATION_SUCCEEDED;
   }
 
   return CALIBRATION_FAILED;
+}
+
+
+uint8_t calibrationFailedSensor()
+{
+  return failedSensor;
 }

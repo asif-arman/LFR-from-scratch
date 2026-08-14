@@ -5,7 +5,9 @@
 
 enum NavigationResult : uint8_t
 {
-  NAVIGATION_ACTIVE
+  NAVIGATION_ACTIVE,
+  NAVIGATION_FINISHED,
+  NAVIGATION_LOST
 };
 
 

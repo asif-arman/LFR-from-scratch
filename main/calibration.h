@@ -14,3 +14,4 @@ enum CalibrationResult : uint8_t
 void calibrationStart();
 void calibrationCancel();
 CalibrationResult calibrationTick(uint16_t sensorValues[]);
+uint8_t calibrationFailedSensor();
