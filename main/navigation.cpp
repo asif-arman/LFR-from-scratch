@@ -43,7 +43,8 @@ static uint32_t nextControlAtMicros = 0;
 static uint16_t worstSensorFrameMicros = 0;
 static uint16_t worstControlTickMicros = 0;
 static uint16_t stateTicks = 0;
-static uint8_t inverseCooldownTicks = INVERSE_COOLDOWN_TICKS;
+static uint8_t inverseRearmStableCount = 0;
+static bool inverseTransitionArmed = true;
 
 static int16_t previousError = 0;
 static bool previousErrorValid = false;
@@ -286,6 +287,16 @@ static void rememberError(int16_t error)
 }
 
 
+static bool outwardSharpTurnLikely()
+{
+  if (recentErrorCount == 0 ||
+      outwardTrendCount < TURN_OUTWARD_CONFIRM)
+    return false;
+  return absoluteError(recentErrors[recentErrorCount - 1]) >=
+      TURN_LOSS_ERROR_LIMIT;
+}
+
+
 static int16_t calculatePdLinePosition(uint16_t pattern)
 {
   if (frameSensorValues == 0)
@@ -320,18 +331,17 @@ static int16_t slewFollowPwm(int16_t previous,
                              int16_t target,
                              uint8_t effectiveMinimum)
 {
-  if (target == 0)
+  // A reduction, stop, or signed correction is urgent steering. Apply the
+  // requested target now; motorDirectionGuardCommand() still inserts the
+  // required zero interval if the electrical direction changes.
+  if (target <= previous || (target < 0) != (previous < 0)) return target;
+
+  // Only ordinary forward acceleration is softened.
+  if (target > 0)
   {
-    if (previous <= effectiveMinimum + FOLLOW_PWM_SLEW_STEP) return 0;
-    return previous - FOLLOW_PWM_SLEW_STEP;
-  }
-  if (previous == 0) return effectiveMinimum;
-  if (target > previous + FOLLOW_PWM_SLEW_STEP)
-    return previous + FOLLOW_PWM_SLEW_STEP;
-  if (target < previous - FOLLOW_PWM_SLEW_STEP)
-  {
-    const int16_t reduced = previous - FOLLOW_PWM_SLEW_STEP;
-    return reduced < effectiveMinimum ? effectiveMinimum : reduced;
+    if (previous <= 0) return min(target, (int16_t)effectiveMinimum);
+    if (target > previous + FOLLOW_PWM_RISE_STEP)
+      return previous + FOLLOW_PWM_RISE_STEP;
   }
   return target;
 }
@@ -339,7 +349,41 @@ static int16_t slewFollowPwm(int16_t previous,
 
 static int16_t effectiveMotorPwm(int16_t pwm, uint8_t effectiveMinimum)
 {
-  return pwm > 0 && pwm < effectiveMinimum ? 0 : pwm;
+  const uint16_t magnitude = pwm < 0 ? (uint16_t)-pwm : (uint16_t)pwm;
+  return magnitude > 0 && magnitude < effectiveMinimum ? 0 : pwm;
+}
+
+
+static uint8_t calculateApproachSpeed(uint16_t absolute,
+                                      uint8_t speedLimit)
+{
+  uint16_t approachSpeed = min(baseSpeed, speedLimit);
+  if (absolute > ADAPTIVE_SPEED_START_ERROR)
+  {
+    const uint16_t reduction = min(
+        (uint16_t)((absolute - ADAPTIVE_SPEED_START_ERROR) /
+            ADAPTIVE_SPEED_REDUCTION_DIVISOR),
+        (uint16_t)ADAPTIVE_SPEED_MAX_REDUCTION);
+    approachSpeed = reduction >= approachSpeed ? 0 :
+        approachSpeed - reduction;
+  }
+
+  if (speedLimit == 255 &&
+      outwardTrendCount >= TURN_OUTWARD_CONFIRM &&
+      absolute > TURN_SLOW_START_ERROR)
+  {
+    const uint16_t incomingSpeed = approachSpeed;
+    const uint16_t minimum = incomingSpeed > TURN_APPROACH_MIN_PWM ?
+        TURN_APPROACH_MIN_PWM : incomingSpeed;
+    const uint16_t reduction =
+        (absolute - TURN_SLOW_START_ERROR) /
+        TURN_APPROACH_REDUCTION_DIVISOR;
+    approachSpeed = reduction >= incomingSpeed ? 0 :
+        incomingSpeed - reduction;
+    if (approachSpeed < minimum) approachSpeed = minimum;
+  }
+
+  return approachSpeed;
 }
 
 
@@ -367,30 +411,15 @@ static void applyPd(uint16_t pattern, uint8_t speedLimit = 255)
   previousErrorValid = true;
   rememberError(error);
 
-  int16_t approachSpeed = min(baseSpeed, speedLimit);
   const uint16_t absolute = absoluteError(error);
-  if (absolute > ADAPTIVE_SPEED_START_ERROR)
-  {
-    const uint16_t reduction = min(
-        (uint16_t)((absolute - ADAPTIVE_SPEED_START_ERROR) /
-            ADAPTIVE_SPEED_REDUCTION_DIVISOR),
-        (uint16_t)ADAPTIVE_SPEED_MAX_REDUCTION);
-    approachSpeed -= min(reduction, (uint16_t)approachSpeed);
-  }
-  if (speedLimit == 255 &&
-      outwardTrendCount >= TURN_OUTWARD_CONFIRM &&
-      absolute > TURN_SLOW_START_ERROR)
-  {
-    const uint16_t reduction =
-        (absolute - TURN_SLOW_START_ERROR) /
-        TURN_APPROACH_REDUCTION_DIVISOR;
-    approachSpeed -= min(reduction, (uint16_t)baseSpeed);
-    if (approachSpeed < TURN_APPROACH_MIN_PWM)
-      approachSpeed = TURN_APPROACH_MIN_PWM;
-  }
+  const int16_t approachSpeed = calculateApproachSpeed(absolute, speedLimit);
 
-  int16_t leftPwm = constrain(approachSpeed + correction, 0, 255);
-  int16_t rightPwm = constrain(approachSpeed - correction, 0, 255);
+  const int16_t reverseLimit = absolute >= FOLLOW_REVERSE_START_ERROR ?
+      -(int16_t)FOLLOW_REVERSE_MAX_PWM : 0;
+  int16_t leftPwm = constrain(approachSpeed + correction,
+                              reverseLimit, 255);
+  int16_t rightPwm = constrain(approachSpeed - correction,
+                               reverseLimit, 255);
   leftPwm = effectiveMotorPwm(leftPwm, LEFT_MOTOR_EFFECTIVE_MIN_PWM);
   rightPwm = effectiveMotorPwm(rightPwm, RIGHT_MOTOR_EFFECTIVE_MIN_PWM);
   if (followMixerValid)
@@ -438,11 +467,6 @@ static uint8_t confirmedRoutes()
 
 static bool isInverseTransition(uint16_t blackPattern)
 {
-  if (inverseCooldownTicks < INVERSE_COOLDOWN_TICKS)
-  {
-    return false;
-  }
-
   const uint16_t candidateLine = lineIsInverse ?
       blackPattern : (ALL_SENSOR_MASK ^ blackPattern);
   const uint16_t candidateBackground = lineIsInverse ?
@@ -457,15 +481,44 @@ static bool isInverseTransition(uint16_t blackPattern)
 }
 
 
+static bool currentPolarityIsStable(uint16_t blackPattern)
+{
+  const uint16_t currentLine = lineIsInverse ?
+      (ALL_SENSOR_MASK ^ blackPattern) : blackPattern;
+  return isNarrowLine(currentLine) &&
+         patternGroups(currentLine) == 1;
+}
+
+
 static bool updateInverseMode(uint16_t blackPattern)
 {
-  if (isInverseTransition(blackPattern))
+  const bool transitionCandidate = isInverseTransition(blackPattern);
+
+  if (!inverseTransitionArmed)
+  {
+    inverseConfirmCount = 0;
+    if (!transitionCandidate && currentPolarityIsStable(blackPattern))
+    {
+      if (inverseRearmStableCount < INVERSE_REARM_STABLE_TICKS)
+        inverseRearmStableCount++;
+      if (inverseRearmStableCount >= INVERSE_REARM_STABLE_TICKS)
+        inverseTransitionArmed = true;
+    }
+    else
+    {
+      inverseRearmStableCount = 0;
+    }
+    return false;
+  }
+
+  if (transitionCandidate)
   {
     if (++inverseConfirmCount >= INVERSE_CONFIRM_TICKS)
     {
       lineIsInverse = !lineIsInverse;
-      inverseCooldownTicks = 0;
       inverseConfirmCount = 0;
+      inverseRearmStableCount = 0;
+      inverseTransitionArmed = false;
 
       // A polarity boundary looks wide in the old polarity. Cancel only that
       // temporary probe; an active junction selection remains locked.
@@ -669,6 +722,19 @@ static NavigationResult tickFollow(uint16_t blackPattern, uint16_t pattern)
   const uint8_t count = activeCount(pattern);
   if (count == 0)
   {
+    if (outwardSharpTurnLikely())
+    {
+      const RouteDirection turnRoute = lastReliableSide < 0 ?
+          ROUTE_LEFT : ROUTE_RIGHT;
+      const int8_t direction = turnRoute == ROUTE_LEFT ? -1 : 1;
+      beginTurn(turnRoute);
+      // This transition was triggered by an all-clear frame, so the incoming
+      // centre line has already disappeared; do not wait to rediscover that.
+      turnSawCenterLost = true;
+      moveLFR(direction * TURN_PWM, -direction * TURN_PWM);
+      return NAVIGATION_ACTIVE;
+    }
+
     beginForwardProbe(PROBE_LOST_LINE);
     moveLFR(gapProbeLeft, gapProbeRight);
     return NAVIGATION_ACTIVE;
@@ -1045,7 +1111,8 @@ void navigationStart()
   terminalResult = NAVIGATION_ACTIVE;
   stateTicks = 0;
   lineIsInverse = false;
-  inverseCooldownTicks = INVERSE_COOLDOWN_TICKS;
+  inverseRearmStableCount = 0;
+  inverseTransitionArmed = true;
   centerStableCount = 0;
   inverseConfirmCount = 0;
   probeNarrowConfirmCount = 0;
@@ -1054,6 +1121,8 @@ void navigationStart()
   startCleared = !boxMode;
   finishArmed = false;
   lastReliableSide = 1;
+  junctionIncomingError = 0;
+  junctionIncomingCentered = true;
   junctionActive = false;
   junctionAvailableRoutes = 0;
   attemptedRoutes = 0;
@@ -1102,9 +1171,6 @@ NavigationResult navigationTick(uint16_t sensorValues[])
 
   frameSensorValues = sensorValues;
   const uint16_t blackPattern = makeSensorPattern(sensorValues);
-
-  if (inverseCooldownTicks < INVERSE_COOLDOWN_TICKS)
-    inverseCooldownTicks++;
 
   const bool polarityState = !boxMode && (state == STATE_FOLLOW ||
       state == STATE_FORWARD_PROBE || state == STATE_ROUTE_COMMIT);

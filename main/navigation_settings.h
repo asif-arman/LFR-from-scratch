@@ -29,7 +29,10 @@ constexpr uint16_t TURN_TIMEOUT_TICKS = 400;        // ~1.4 s
 constexpr uint8_t UTURN_MIN_TICKS = 72;             // ~252 ms
 constexpr uint16_t UTURN_TIMEOUT_TICKS = 515;       // ~1.8 s
 constexpr uint8_t INVERSE_CONFIRM_TICKS = 2;        // ~7 ms
-constexpr uint8_t INVERSE_COOLDOWN_TICKS = 143;     // ~500 ms
+// After a polarity toggle, require a few stable frames in the new polarity
+// before another boundary can be considered. This rejects boundary chatter
+// without imposing a blind distance/time lockout on short inverse sections.
+constexpr uint8_t INVERSE_REARM_STABLE_TICKS = 3;   // ~10.5 ms
 
 
 // ================================================================
@@ -75,7 +78,14 @@ constexpr uint8_t TURN_CROSS_CORRECTION_PWM = 90;
 
 constexpr uint8_t LEFT_MOTOR_EFFECTIVE_MIN_PWM = 90;
 constexpr uint8_t RIGHT_MOTOR_EFFECTIVE_MIN_PWM = 90;
-constexpr uint8_t FOLLOW_PWM_SLEW_STEP = 36;
+// Ordinary forward acceleration is limited; urgent inside-wheel reduction and
+// signed correction are immediate. The motor guard protects sign reversals.
+constexpr uint8_t FOLLOW_PWM_RISE_STEP = 36;
+
+// FOLLOW may reverse only the inside wheel, only for a severe line error, and
+// only up to this bounded magnitude.
+constexpr uint16_t FOLLOW_REVERSE_START_ERROR = 350;
+constexpr uint8_t FOLLOW_REVERSE_MAX_PWM = 110;
 
 
 // ================================================================

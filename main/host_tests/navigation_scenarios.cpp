@@ -225,6 +225,15 @@ static void clearStartAndArmFinish(uint16_t centered)
 }
 
 
+static void driveToUTurn(uint16_t centered)
+{
+  tick(centered);
+  tick(0);
+  repeat(0, LOSS_PROBE_TICKS);
+  assert(state == STATE_U_TURN);
+}
+
+
 int main()
 {
   const uint16_t centered = oneSensor(6) | oneSensor(7);
@@ -247,9 +256,11 @@ int main()
   resetScenario();
   tick(leftLine);
   assert(previousError < 0 && commandedLeft < commandedRight);
+  assert(commandedLeft >= 0 && commandedRight >= 0);
   resetScenario();
   tick(rightLine);
   assert(previousError > 0 && commandedLeft > commandedRight);
+  assert(commandedLeft >= 0 && commandedRight >= 0);
 
   // Analog centroid moves smoothly within one unchanged binary group.
   resetScenario();
@@ -265,18 +276,49 @@ int main()
   tickFrame(analogFrame);
   assert(previousError > firstError);
 
-  // Absolute error reduces average speed; FOLLOW slew never enters dead zone.
+  // Approach speed decreases monotonically as error and outward trend grow.
   resetScenario();
   kpX100 = 0;
+  kdX100 = 0;
   tick(centered);
-  const int16_t centeredTotal = commandedLeft + commandedRight;
-  tick(leftLine);
-  assert(commandedLeft + commandedRight < centeredTotal);
+  const int16_t centeredSpeed = commandedLeft;
+  tick(oneSensor(8));
+  const int16_t mediumSpeed = commandedLeft;
+  tick(oneSensor(10));
+  const int16_t largeSpeed = commandedLeft;
+  tick(oneSensor(12));
+  const int16_t outwardSpeed = commandedLeft;
+  assert(centeredSpeed > mediumSpeed && mediumSpeed > largeSpeed &&
+         largeSpeed > outwardSpeed);
+  assert(outwardTrendCount >= TURN_OUTWARD_CONFIRM);
   assert((commandedLeft == 0 || commandedLeft >= LEFT_MOTOR_EFFECTIVE_MIN_PWM));
   assert((commandedRight == 0 || commandedRight >= RIGHT_MOTOR_EFFECTIVE_MIN_PWM));
   assert(slewFollowPwm(0, 160, 90) == 90);
-  assert(slewFollowPwm(90, 0, 90) == 0);
-  assert(slewFollowPwm(152, 0, 90) == 116);
+  assert(slewFollowPwm(160, 90, 90) == 90);
+  assert(slewFollowPwm(160, 0, 90) == 0);
+  assert(slewFollowPwm(160, -110, 90) == -110);
+
+  // A severe error requests bounded inside-wheel reverse immediately. The
+  // common direction guard produces zero first, then allows the signed target.
+  resetScenario();
+  tick(centered);
+  tick(oneSensor(0));
+  assert(previousFollowRight == -FOLLOW_REVERSE_MAX_PWM);
+  assert(commandedLeft > 0 && commandedRight == 0);
+  tick(oneSensor(0));
+  assert(commandedLeft > 0 && commandedRight < 0);
+  assert(-commandedRight >= RIGHT_MOTOR_EFFECTIVE_MIN_PWM &&
+         -commandedRight <= FOLLOW_REVERSE_MAX_PWM);
+
+  resetScenario();
+  tick(centered);
+  tick(oneSensor(13));
+  assert(previousFollowLeft == -FOLLOW_REVERSE_MAX_PWM);
+  assert(commandedLeft == 0 && commandedRight > 0);
+  tick(oneSensor(13));
+  assert(commandedLeft < 0 && commandedRight > 0);
+  assert(-commandedLeft >= LEFT_MOTOR_EFFECTIVE_MIN_PWM &&
+         -commandedLeft <= FOLLOW_REVERSE_MAX_PWM);
 
   // A short gap retains bounded steering and confirms the full-array return.
   resetScenario();
@@ -301,20 +343,36 @@ int main()
     assert(state == STATE_FOLLOW && terminalResult == NAVIGATION_ACTIVE);
   }
 
-  // Persistent loss goes directly to a signed, history-directed U-turn.
+  // An outward-moving left/right edge loss starts the matching quick turn
+  // immediately instead of consuming the centred dotted-gap allowance.
   resetScenario();
-  tick(leftLine);
+  tick(oneSensor(8));
+  tick(oneSensor(10));
+  tick(oneSensor(12));
   tick(0);
-  repeat(0, LOSS_PROBE_TICKS);
-  assert(state == STATE_U_TURN);
+  assert(state == STATE_TURN_TO_ROUTE && selectedRoute == ROUTE_LEFT);
+  assert(commandedLeft < 0 && commandedRight > 0);
+
+  resetScenario();
+  tick(oneSensor(5));
+  tick(oneSensor(3));
+  tick(oneSensor(1));
+  tick(0);
+  assert(state == STATE_TURN_TO_ROUTE && selectedRoute == ROUTE_RIGHT);
+  assert(commandedLeft > 0 && commandedRight < 0);
+
+  // Persistent centred loss consumes the gap allowance, then starts a bounded
+  // history-directed U-turn rather than an endless reverse/search sequence.
+  resetScenario();
+  driveToUTurn(centered);
   tick(0);
   tick(0); // lets the 2.5 ms common reversal guard expire
-  assert(commandedLeft < 0 && commandedRight > 0);
-  assert(commandedLeft == -UTURN_PWM && commandedRight == UTURN_PWM);
+  assert(commandedLeft > 0 && commandedRight < 0);
+  assert(commandedLeft == UTURN_PWM && commandedRight == -UTURN_PWM);
 
   // The original center line is ignored before the U-turn minimum guard.
   resetScenario();
-  beginUTurn();
+  driveToUTurn(centered);
   repeat(centered, UTURN_MIN_TICKS - 1);
   assert(state == STATE_U_TURN);
   tick(centered);
@@ -324,26 +382,36 @@ int main()
 
   // An unsuccessful U-turn has one bounded timeout and a terminal lost result.
   resetScenario();
-  beginUTurn();
+  driveToUTurn(centered);
   repeat(0, UTURN_TIMEOUT_TICKS - 1);
   assert(state == STATE_U_TURN);
   assert(tick(0) == NAVIGATION_LOST);
   assert(state == STATE_STOPPED && commandedLeft == 0 && commandedRight == 0);
   assert(tick(0) == NAVIGATION_LOST);
 
-  // BOX OFF keeps both inverse transitions and never treats full black as finish.
+  // BOX OFF supports a short inverse section without a blind 500 ms lockout:
+  // normal -> inverse, three stable inverse frames, then inverse -> normal.
   resetScenario(false);
   tick(centered);
   tick(inverseEntry);
   tick(inverseEntry);
   assert(lineIsInverse && state == STATE_FOLLOW);
-  inverseCooldownTicks = INVERSE_COOLDOWN_TICKS;
+  assert(!inverseTransitionArmed);
+  repeat(inverseEntry, INVERSE_REARM_STABLE_TICKS);
+  assert(inverseTransitionArmed);
   tick(centered);
+  assert(lineIsInverse && state == STATE_FORWARD_PROBE);
   tick(centered);
   assert(!lineIsInverse && state == STATE_FOLLOW);
+  assert(commandedLeft > 0 && commandedRight > 0);
+  tick(rightLine);
+  assert(previousError > 0 && commandedLeft > commandedRight);
+
+  // Unrelated full-black geometry never becomes a polarity transition/finish.
   resetScenario(false);
   repeat(ALL_SENSOR_MASK, FINISH_CONFIRM_TICKS + 4);
   assert(terminalResult == NAVIGATION_ACTIVE && state != STATE_STOPPED);
+  assert(!lineIsInverse);
 
   // BOX ON isolates the start box from junction/loss/finish logic.
   resetScenario(true);
@@ -376,47 +444,55 @@ int main()
   assert(finishResult == NAVIGATION_FINISHED);
   assert(state == STATE_STOPPED && commandedLeft == 0 && commandedRight == 0);
 
-  // Explicit route turns use signed pivot constants in both directions.
+  const uint16_t leftAndStraight = 0x3FC0;
+  const uint16_t rightAndStraight = 0x00FF;
+
+  // Sensor-driven angled approaches select signed left/right pivots.
   resetScenario();
-  junctionIncomingCentered = false;
-  junctionIncomingError = -300;
-  startJunction(ROUTE_LEFT | ROUTE_STRAIGHT);
+  tick(oneSensor(8));
+  repeat(leftAndStraight, 2);
+  repeat(centered, LINE_CONFIRM_TICKS);
   assert(selectedRoute == ROUTE_LEFT && state == STATE_TURN_TO_ROUTE);
   tick(0);
   assert(commandedLeft == -TURN_PWM && commandedRight == TURN_PWM);
+
   resetScenario();
-  junctionIncomingCentered = false;
-  junctionIncomingError = 300;
-  startJunction(ROUTE_RIGHT | ROUTE_STRAIGHT);
+  tick(oneSensor(5));
+  repeat(rightAndStraight, 2);
+  repeat(centered, LINE_CONFIRM_TICKS);
+  assert(selectedRoute == ROUTE_RIGHT && state == STATE_TURN_TO_ROUTE);
   tick(0);
   assert(commandedLeft == TURN_PWM && commandedRight == -TURN_PWM);
 
-  // Centered continuity prefers straight; angled continuity prefers its side.
+  // A centred approach to a cross preserves geometric continuity.
   resetScenario();
-  junctionIncomingCentered = true;
-  junctionIncomingError = 0;
-  startJunction(ROUTE_LEFT | ROUTE_STRAIGHT | ROUTE_RIGHT);
-  assert(selectedRoute == ROUTE_STRAIGHT);
-  resetScenario();
-  junctionIncomingCentered = false;
-  junctionIncomingError = -250;
-  startJunction(ROUTE_LEFT | ROUTE_STRAIGHT | ROUTE_RIGHT);
-  assert(selectedRoute == ROUTE_LEFT);
+  tick(centered);
+  repeat(ALL_SENSOR_MASK, 2);
+  repeat(centered, LINE_CONFIRM_TICKS);
+  assert(selectedRoute == ROUTE_STRAIGHT && state == STATE_ROUTE_COMMIT);
 
-  // If continuity is ambiguous, every configured priority picks its first exit.
+  // With no straight exit, all six configured orders select the first
+  // available left/right route in their public priority table.
   for (uint8_t priority = 0; priority < ROUTE_PRIORITY_COUNT; priority++)
   {
     resetScenario();
     routePriority = priority;
-    junctionIncomingCentered = false;
-    junctionIncomingError = 0;
-    startJunction(ROUTE_LEFT | ROUTE_STRAIGHT | ROUTE_RIGHT);
-    assert(selectedRoute == settingsPriorityAt(0));
+    tick(centered);
+    repeat(ALL_SENSOR_MASK, 2);
+    tick(0);
+    repeat(0, PROBE_BRAKE_TICKS);
+
+    RouteDirection expected = ROUTE_NONE;
+    for (uint8_t rank = 0; rank < 3 && expected == ROUTE_NONE; rank++)
+    {
+      const RouteDirection candidate = settingsPriorityAt(rank);
+      if (candidate == ROUTE_LEFT || candidate == ROUTE_RIGHT)
+        expected = candidate;
+    }
+    assert(selectedRoute == expected);
   }
 
-  // Sensor-driven left T, right T, three-way/cross classification.
-  const uint16_t leftAndStraight = 0x3FC0;
-  const uint16_t rightAndStraight = 0x00FF;
+  // Sensor-driven left T, right T, and three-way/cross classification.
   resetScenario();
   tick(centered);
   repeat(leftAndStraight, 2);
@@ -434,17 +510,7 @@ int main()
   assert(junctionAvailableRoutes ==
          (ROUTE_LEFT | ROUTE_STRAIGHT | ROUTE_RIGHT));
 
-  // Left/right T patterns and a separated angled crossing accumulate routes.
-  resetScenario();
-  junctionIncomingCentered = false;
-  junctionIncomingError = 0;
-  startJunction(ROUTE_LEFT | ROUTE_STRAIGHT);
-  assert((junctionAvailableRoutes & (ROUTE_LEFT | ROUTE_STRAIGHT)) ==
-         (ROUTE_LEFT | ROUTE_STRAIGHT));
-  resetScenario();
-  startJunction(ROUTE_RIGHT | ROUTE_STRAIGHT);
-  assert((junctionAvailableRoutes & (ROUTE_RIGHT | ROUTE_STRAIGHT)) ==
-         (ROUTE_RIGHT | ROUTE_STRAIGHT));
+  // A separated angled crossing accumulates multiple route regions.
   resetScenario();
   const uint16_t separated = oneSensor(4) | oneSensor(5) | oneSensor(7);
   repeat(separated, JUNCTION_CONFIRM_TICKS);
@@ -453,8 +519,9 @@ int main()
 
   // A route rearms after stable narrow exit, allowing a nearby junction.
   resetScenario();
-  junctionIncomingCentered = true;
-  startJunction(ROUTE_STRAIGHT | ROUTE_LEFT);
+  tick(centered);
+  repeat(leftAndStraight, 2);
+  repeat(centered, LINE_CONFIRM_TICKS);
   assert(state == STATE_ROUTE_COMMIT);
   repeat(centered, JUNCTION_EXIT_CONFIRM_TICKS);
   assert(state == STATE_FOLLOW && !junctionActive);
