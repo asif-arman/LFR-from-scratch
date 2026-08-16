@@ -11,18 +11,14 @@ constexpr uint8_t ANALOG_NOISE_FLOOR = 20;
 
 
 // ================================================================
-// FRAME-COUNTED CONFIRMATION AND MINIMUM DURATIONS
+// FRAME-COUNTED CONFIRMATIONS AND DURATIONS
 // ================================================================
 
-constexpr uint8_t LINE_CONFIRM_TICKS = 2;            // ~7 ms
-constexpr uint8_t GAP_ALLOWANCE_TICKS = 20;          // ~70 ms
+constexpr uint8_t GAP_ALLOWANCE_TICKS = 35;          // ~122.5 ms
 constexpr uint8_t SIDE_CONFIRM_TICKS = 2;            // ~7 ms
 constexpr uint8_t JUNCTION_CLEAR_TICKS = 2;          // ~7 ms
 constexpr uint8_t REACQUIRE_CONFIRM_TICKS = 3;       // ~10.5 ms
 constexpr uint8_t TURN_CENTER_LOST_TICKS = 2;        // ~7 ms
-constexpr uint8_t TURN_CENTER_CONFIRM_TICKS = 2;     // ~7 ms
-constexpr uint8_t TURN_MIN_TICKS = 8;                // ~28 ms
-constexpr uint8_t UTURN_MIN_TICKS = 72;              // ~252 ms
 constexpr uint8_t START_EXIT_CONFIRM_TICKS = 4;      // ~14 ms
 constexpr uint8_t FINISH_ARM_TICKS = 12;             // ~42 ms
 constexpr uint8_t FINISH_CONFIRM_TICKS = 8;          // ~28 ms
@@ -41,8 +37,8 @@ constexpr uint8_t BOX_MIN_SPAN = 12;
 
 // A disappearing line is a directed sharp corner only after its calibrated
 // position reached an outer sensor region. Centered loss remains a gap.
-constexpr int16_t RIGHT_EDGE_MAX_POSITION = 350; // near S0..S3
-constexpr int16_t LEFT_EDGE_MIN_POSITION = 950;  // near S10..S13
+constexpr int16_t RIGHT_EDGE_MAX_POSITION = 450; // near S0..S4
+constexpr int16_t LEFT_EDGE_MIN_POSITION = 850;  // near S9..S13
 
 
 // ================================================================

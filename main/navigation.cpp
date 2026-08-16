@@ -27,8 +27,7 @@ enum NavState : uint8_t
 enum ReacquireMotion : uint8_t
 {
   REACQUIRE_FORWARD,
-  REACQUIRE_TURN,
-  REACQUIRE_U_TURN
+  REACQUIRE_TURN
 };
 
 
@@ -57,7 +56,6 @@ static int8_t lastLineSide = 1;
 
 static int16_t gapLeft = 0;
 static int16_t gapRight = 0;
-static uint8_t lineConfirmCount = 0;
 static uint8_t reacquireStableCount = 0;
 static ReacquireMotion reacquireMotion = REACQUIRE_FORWARD;
 
@@ -77,7 +75,6 @@ static bool avoidStraightAtNextJunction = false;
 
 static int8_t turnDirection = 1;
 static uint8_t oldCenterAbsentCount = 0;
-static uint8_t turnCenterCount = 0;
 static bool oldCenterWasLeft = false;
 
 static bool startBoxPending = false;
@@ -333,9 +330,26 @@ static void setReacquireState(ReacquireMotion motion)
 }
 
 
+static void resumeFollowWithPd(int16_t linePosition)
+{
+  state = STATE_FOLLOW;
+  stateTicks = 0;
+  resetPd();
+  applyPd(linePosition, baseSpeed);
+}
+
+
 static void beginActiveReacquire(ReacquireMotion motion,
                                  int16_t linePosition)
 {
+  // A usable line overrides loss recovery immediately. Junction turns keep
+  // REACQUIRE only so their three-frame physical-exit lock can be cleared.
+  if (!junctionLocked)
+  {
+    resumeFollowWithPd(linePosition);
+    return;
+  }
+
   setReacquireState(motion);
   applyPd(linePosition, baseSpeed);
   reacquireStableCount = 1;
@@ -357,14 +371,14 @@ static void commandUTurn()
 
 
 static void beginTurn(RouteDirection route,
-                      bool firstAbsentFrame = false)
+                      uint8_t confirmedAbsentFrames = 0)
 {
   turnDirection = route == ROUTE_LEFT ? -1 : 1;
   state = STATE_TURN;
   stateTicks = 0;
-  oldCenterAbsentCount = firstAbsentFrame ? 1 : 0;
-  turnCenterCount = 0;
-  oldCenterWasLeft = false;
+  oldCenterAbsentCount = min(confirmedAbsentFrames,
+                             TURN_CENTER_LOST_TICKS);
+  oldCenterWasLeft = oldCenterAbsentCount >= TURN_CENTER_LOST_TICKS;
   lastForwardValid = false;
   resetPd();
   commandTurn();
@@ -377,7 +391,6 @@ static void beginUTurn(bool oldLineAlreadyGone)
   state = STATE_U_TURN;
   stateTicks = 0;
   oldCenterAbsentCount = oldLineAlreadyGone ? TURN_CENTER_LOST_TICKS : 0;
-  turnCenterCount = 0;
   oldCenterWasLeft = oldLineAlreadyGone;
   lastForwardValid = false;
   resetPd();
@@ -412,7 +425,6 @@ static void beginGap()
   gapRight = constrain(gapRight, 0, 255);
   state = STATE_GAP;
   stateTicks = 0;
-  lineConfirmCount = 0;
   resetPd();
   moveLFR(gapLeft, gapRight);
 }
@@ -487,7 +499,7 @@ static bool commitRoute(RouteDirection route, int16_t linePosition)
   lastChosenRoute = route;
   if (route == ROUTE_LEFT || route == ROUTE_RIGHT)
   {
-    beginTurn(route);
+    beginTurn(route, linePosition < 0 ? TURN_CENTER_LOST_TICKS : 0);
   }
   else if (route == ROUTE_STRAIGHT)
   {
@@ -554,18 +566,16 @@ static NavigationResult tickFollow(uint16_t pattern,
                                    SensorFrameKind frameKind,
                                    int16_t linePosition)
 {
-  if (updateFinishBox(pattern)) return NAVIGATION_FINISHED;
-
   if (frameKind == FRAME_NO_LINE)
   {
-    if (lastLineWasSharpRight())
+    if (!junctionLocked && lastLineWasSharpRight())
     {
-      beginTurn(ROUTE_RIGHT, true);
+      beginTurn(ROUTE_RIGHT, 1);
       return NAVIGATION_ACTIVE;
     }
-    if (lastLineWasSharpLeft())
+    if (!junctionLocked && lastLineWasSharpLeft())
     {
-      beginTurn(ROUTE_LEFT, true);
+      beginTurn(ROUTE_LEFT, 1);
       return NAVIGATION_ACTIVE;
     }
     beginGap();
@@ -618,36 +628,16 @@ static NavigationResult tickGap(uint16_t pattern,
   incrementStateTicks();
   if (frameKind == FRAME_NORMAL_LINE)
   {
-    stateTicks = 0; // the next loss must receive a complete gap allowance
-    if (lineConfirmCount < LINE_CONFIRM_TICKS) lineConfirmCount++;
-    if (lineConfirmCount >= LINE_CONFIRM_TICKS)
-    {
-      state = STATE_FOLLOW;
-      resetPd();
-      applyPd(linePosition, baseSpeed);
-      return NAVIGATION_ACTIVE;
-    }
+    // One dot is enough: leave GAP now, so the next white frame starts a
+    // completely new uninterrupted-gap allowance.
+    resumeFollowWithPd(linePosition);
+    return NAVIGATION_ACTIVE;
   }
-  else
+  else if (frameKind == FRAME_JUNCTION_FEATURE)
   {
-    lineConfirmCount = 0;
-    if (frameKind == FRAME_JUNCTION_FEATURE)
-    {
-      resetJunctionDetection();
-      beginJunctionProbe(pattern);
-      return NAVIGATION_ACTIVE;
-    }
-
-    if (frameKind == FRAME_NO_LINE && lastLineWasSharpRight())
-    {
-      beginTurn(ROUTE_RIGHT, true);
-      return NAVIGATION_ACTIVE;
-    }
-    if (frameKind == FRAME_NO_LINE && lastLineWasSharpLeft())
-    {
-      beginTurn(ROUTE_LEFT, true);
-      return NAVIGATION_ACTIVE;
-    }
+    resetJunctionDetection();
+    beginJunctionProbe(pattern);
+    return NAVIGATION_ACTIVE;
   }
 
   if (stateTicks >= GAP_ALLOWANCE_TICKS)
@@ -691,7 +681,6 @@ static NavigationResult tickJunctionProbe(uint16_t pattern,
                                            SensorFrameKind frameKind,
                                            int16_t linePosition)
 {
-  if (updateFinishBox(pattern)) return NAVIGATION_FINISHED;
   updateProbeSideEvidence(pattern);
 
   if (frameKind == FRAME_JUNCTION_FEATURE)
@@ -713,9 +702,10 @@ static NavigationResult tickJunctionProbe(uint16_t pattern,
 }
 
 
-static NavigationResult tickTurn(uint16_t pattern, int16_t linePosition)
+static NavigationResult tickTurn(uint16_t pattern,
+                                 SensorFrameKind frameKind,
+                                 int16_t linePosition)
 {
-  incrementStateTicks();
   if (!oldCenterWasLeft)
   {
     if (!centerSeesLine(pattern))
@@ -728,26 +718,30 @@ static NavigationResult tickTurn(uint16_t pattern, int16_t linePosition)
     else oldCenterAbsentCount = 0;
   }
 
-  if (oldCenterWasLeft && stateTicks >= TURN_MIN_TICKS &&
-      isCredibleCenterLine(pattern))
+  if (oldCenterWasLeft && frameKind == FRAME_NORMAL_LINE)
   {
-    if (turnCenterCount < TURN_CENTER_CONFIRM_TICKS) turnCenterCount++;
-    if (turnCenterCount >= TURN_CENTER_CONFIRM_TICKS)
-    {
-      beginActiveReacquire(REACQUIRE_TURN, linePosition);
-      return NAVIGATION_ACTIVE;
-    }
+    // Once the old center is gone, the first usable line anywhere on the
+    // array is the outgoing line. PD corrects it before the pivot overshoots.
+    beginActiveReacquire(REACQUIRE_TURN, linePosition);
+    return NAVIGATION_ACTIVE;
   }
-  else turnCenterCount = 0;
 
   commandTurn();
   return NAVIGATION_ACTIVE;
 }
 
 
-static NavigationResult tickUTurn(uint16_t pattern, int16_t linePosition)
+static NavigationResult tickUTurn(uint16_t pattern,
+                                  SensorFrameKind frameKind,
+                                  int16_t linePosition)
 {
-  incrementStateTicks();
+  if (frameKind == FRAME_JUNCTION_FEATURE)
+  {
+    resetJunctionDetection();
+    beginJunctionProbe(pattern);
+    return NAVIGATION_ACTIVE;
+  }
+
   if (!oldCenterWasLeft)
   {
     if (!centerSeesLine(pattern))
@@ -760,17 +754,13 @@ static NavigationResult tickUTurn(uint16_t pattern, int16_t linePosition)
     else oldCenterAbsentCount = 0;
   }
 
-  if (oldCenterWasLeft && stateTicks >= UTURN_MIN_TICKS &&
-      isCredibleCenterLine(pattern))
+  if (oldCenterWasLeft && frameKind == FRAME_NORMAL_LINE)
   {
-    if (turnCenterCount < TURN_CENTER_CONFIRM_TICKS) turnCenterCount++;
-    if (turnCenterCount >= TURN_CENTER_CONFIRM_TICKS)
-    {
-      beginActiveReacquire(REACQUIRE_U_TURN, linePosition);
-      return NAVIGATION_ACTIVE;
-    }
+    // GAP already proved the departed line absent. Never rotate through a
+    // newly found usable line while waiting for a timer or center sensor.
+    resumeFollowWithPd(linePosition);
+    return NAVIGATION_ACTIVE;
   }
-  else turnCenterCount = 0;
 
   commandUTurn();
   return NAVIGATION_ACTIVE;
@@ -778,6 +768,7 @@ static NavigationResult tickUTurn(uint16_t pattern, int16_t linePosition)
 
 
 static NavigationResult tickReacquire(uint16_t pattern,
+                                      SensorFrameKind frameKind,
                                       int16_t linePosition)
 {
   if (startBoxPending)
@@ -805,8 +796,14 @@ static NavigationResult tickReacquire(uint16_t pattern,
     return NAVIGATION_ACTIVE;
   }
 
-  if (linePosition >= 0)
+  if (frameKind == FRAME_NORMAL_LINE)
   {
+    if (!junctionLocked)
+    {
+      resumeFollowWithPd(linePosition);
+      return NAVIGATION_ACTIVE;
+    }
+
     applyPd(linePosition, baseSpeed);
     if (reacquireStableCount < REACQUIRE_CONFIRM_TICKS)
       reacquireStableCount++;
@@ -820,9 +817,15 @@ static NavigationResult tickReacquire(uint16_t pattern,
     return NAVIGATION_ACTIVE;
   }
 
+  if (!junctionLocked && frameKind == FRAME_JUNCTION_FEATURE)
+  {
+    resetJunctionDetection();
+    beginJunctionProbe(pattern);
+    return NAVIGATION_ACTIVE;
+  }
+
   reacquireStableCount = 0;
   if (reacquireMotion == REACQUIRE_TURN) commandTurn();
-  else if (reacquireMotion == REACQUIRE_U_TURN) commandUTurn();
   else moveLFR(JUNCTION_CRAWL_PWM, JUNCTION_CRAWL_PWM);
   return NAVIGATION_ACTIVE;
 }
@@ -838,14 +841,12 @@ void navigationStart()
   lastForwardValid = false;
   lastLinePosition = LINE_CENTER;
   lastLineSide = 1;
-  lineConfirmCount = 0;
   reacquireStableCount = 0;
   reacquireMotion = REACQUIRE_FORWARD;
   junctionLocked = false;
   lastChosenRoute = ROUTE_NONE;
   avoidStraightAtNextJunction = false;
   oldCenterAbsentCount = 0;
-  turnCenterCount = 0;
   oldCenterWasLeft = false;
   startBoxPending = boxMode;
   finishArmed = false;
@@ -899,7 +900,11 @@ NavigationResult navigationTick(uint16_t sensorValues[])
   if (linePosition >= 0) rememberOrdinaryLine(linePosition);
 
   NavigationResult result = NAVIGATION_ACTIVE;
-  switch (state)
+  if (updateFinishBox(pattern))
+  {
+    result = NAVIGATION_FINISHED;
+  }
+  else switch (state)
   {
     case STATE_FOLLOW:
       result = tickFollow(pattern, frameKind, linePosition);
@@ -910,10 +915,14 @@ NavigationResult navigationTick(uint16_t sensorValues[])
     case STATE_JUNCTION_PROBE:
       result = tickJunctionProbe(pattern, frameKind, linePosition);
       break;
-    case STATE_TURN: result = tickTurn(pattern, linePosition); break;
-    case STATE_U_TURN: result = tickUTurn(pattern, linePosition); break;
+    case STATE_TURN:
+      result = tickTurn(pattern, frameKind, linePosition);
+      break;
+    case STATE_U_TURN:
+      result = tickUTurn(pattern, frameKind, linePosition);
+      break;
     case STATE_REACQUIRE:
-      result = tickReacquire(pattern, linePosition);
+      result = tickReacquire(pattern, frameKind, linePosition);
       break;
     default:
       safeStop(NAVIGATION_LOST);

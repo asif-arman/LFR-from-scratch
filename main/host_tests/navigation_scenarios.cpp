@@ -185,24 +185,22 @@ static void finishReacquire(uint16_t centered)
 static void finishTurn(uint16_t centered, uint16_t variedCenter)
 {
   assert(state == STATE_TURN);
-  repeat(0, TURN_MIN_TICKS);
-  tick(variedCenter);
-  tick(0); // one noisy frame must not finish the turn
-  repeat(variedCenter, TURN_CENTER_CONFIRM_TICKS);
-  assert(state == STATE_REACQUIRE);
+  tick(centered); // the old center line cannot complete its own turn
+  assert(state == STATE_TURN);
+  repeat(0, TURN_CENTER_LOST_TICKS);
+  tick(variedCenter); // the first outgoing ordinary line stops the pivot
+  assert(state == STATE_REACQUIRE || state == STATE_FOLLOW);
   assert(commandedLeft != 0 || commandedRight != 0);
-  finishReacquire(centered);
+  if (state == STATE_REACQUIRE) finishReacquire(centered);
 }
 
 
 static void finishUTurn(uint16_t centered)
 {
   assert(state == STATE_U_TURN);
-  repeat(0, UTURN_MIN_TICKS);
-  repeat(centered, TURN_CENTER_CONFIRM_TICKS);
-  assert(state == STATE_REACQUIRE);
+  tick(centered); // confirmed GAP loss makes the first found line authoritative
+  assert(state == STATE_FOLLOW);
   assert(commandedLeft != 0 || commandedRight != 0);
-  finishReacquire(centered);
 }
 
 
@@ -218,11 +216,11 @@ static void selectFullCross(uint8_t priority, uint16_t exitPattern)
 int main()
 {
   const uint16_t centered = oneSensor(6) | oneSensor(7);
-  const uint16_t variedCenter = oneSensor(5) | oneSensor(6) |
-      oneSensor(7) | oneSensor(8);
-  const uint16_t mildRight = oneSensor(4);
-  const uint16_t rightEdge = oneSensor(2);
-  const uint16_t leftEdge = oneSensor(11);
+  const uint16_t mildRight = oneSensor(5);
+  const uint16_t rightEdge = oneSensor(4);
+  const uint16_t leftEdge = oneSensor(9);
+  const uint16_t rightOutgoing = oneSensor(1);
+  const uint16_t leftOutgoing = oneSensor(12);
   const uint16_t thinLeftBranch = centered |
       oneSensor(10) | oneSensor(11);
   const uint16_t thinRightBranch = centered |
@@ -263,21 +261,33 @@ int main()
   assert(commandedLeft == 200);
   assert(commandedRight > 0 && commandedRight < 90);
 
-  // A short dotted gap preserves steering and resumes PD after two frames.
+  // GAP keeps the previous steering ratio at a bounded forward speed.
   resetScenario();
   kdX100 = 0;
   tick(mildRight);
   tick(0);
   assert(state == STATE_GAP);
   assert(commandedLeft > commandedRight && commandedRight > 0);
-  repeat(0, 3);
-  tick(mildRight);
-  assert(state == STATE_GAP);
-  tick(mildRight);
-  assert(state == STATE_FOLLOW);
-  assert(commandedLeft == 200 && commandedRight > 0);
+  assert(commandedLeft <= GAP_MAX_PWM && commandedRight <= GAP_MAX_PWM);
 
-  // Centered loss becomes a U-turn only after the complete 70 ms allowance.
+  // Twelve one-frame dots each cancel GAP and reset its own white timer.
+  resetScenario();
+  constexpr uint8_t DOT_GAP_TICKS = 6;
+  for (uint8_t dot = 0; dot < 12; dot++)
+  {
+    tick(centered);
+    assert(state == STATE_FOLLOW && stateTicks == 0);
+    for (uint8_t white = 0; white < DOT_GAP_TICKS; white++)
+    {
+      tick(0);
+      assert(state == STATE_GAP);
+    }
+  }
+  tick(centered);
+  assert(state == STATE_FOLLOW && stateTicks == 0);
+  assert(commandedLeft == 200 && commandedRight == 200);
+
+  // Only one uninterrupted white gap beyond 35 ticks starts a U-turn.
   resetScenario();
   tick(centered);
   tick(0);
@@ -293,14 +303,18 @@ int main()
   assert(lastLinePosition < LINE_CENTER && lastLineSide == 1);
   tick(0);
   assert(state == STATE_TURN && turnDirection == 1);
-  finishTurn(centered, variedCenter);
+  tick(rightOutgoing);
+  assert(state == STATE_FOLLOW);
+  assert(commandedLeft == 200 && commandedRight < 200);
 
   resetScenario();
   tick(leftEdge);
   assert(lastLinePosition > LINE_CENTER && lastLineSide == -1);
   tick(0);
   assert(state == STATE_TURN && turnDirection == -1);
-  finishTurn(centered, variedCenter);
+  tick(leftOutgoing);
+  assert(state == STATE_FOLLOW);
+  assert(commandedLeft < 200 && commandedRight == 200);
 
   // A T-junction clears to white and still chooses an available side.
   resetScenario();
@@ -331,7 +345,8 @@ int main()
   repeat(0, JUNCTION_CLEAR_TICKS);
   assert(state == STATE_TURN && turnDirection == 1);
 
-  // A normal turn and a U-turn continue beyond the removed timeout limits.
+  // A turn may rotate indefinitely, but the first off-center outgoing line
+  // after old-center loss immediately switches its motors back to PD.
   resetScenario();
   routePriority = PRIORITY_LEFT_STRAIGHT_RIGHT;
   repeat(thinLeftBranch, SIDE_CONFIRM_TICKS);
@@ -339,9 +354,11 @@ int main()
   assert(state == STATE_TURN);
   repeat(0, LONG_ROTATION_TEST_TICKS);
   assert(state == STATE_TURN && stopCallCount == 0);
-  repeat(centered, TURN_CENTER_CONFIRM_TICKS);
+  tick(leftOutgoing);
   assert(state == STATE_REACQUIRE);
+  assert(commandedLeft >= 0 && commandedRight > 0);
 
+  // A loss-triggered U-turn accepts a usable line on any sensor immediately.
   resetScenario();
   tick(centered);
   tick(0);
@@ -349,12 +366,19 @@ int main()
   assert(state == STATE_U_TURN);
   repeat(0, LONG_ROTATION_TEST_TICKS);
   assert(state == STATE_U_TURN && stopCallCount == 0);
-  repeat(centered, TURN_CENTER_CONFIRM_TICKS);
-  assert(state == STATE_REACQUIRE);
+  tick(oneSensor(0));
+  assert(state == STATE_FOLLOW);
+  assert(lastForwardLeft == 200 && lastForwardRight > 0);
+  assert(commandedLeft == 200 && commandedRight >= 0);
+
+  // A newly found wide feature also cancels U-turn and starts junction work.
+  resetScenario();
+  tick(centered);
   tick(0);
-  assert(state == STATE_REACQUIRE);
-  assert(commandedLeft != 0 || commandedRight != 0);
-  finishReacquire(centered);
+  repeat(0, GAP_ALLOWANCE_TICKS);
+  assert(state == STATE_U_TURN);
+  tick(ALL_SENSOR_MASK);
+  assert(state == STATE_JUNCTION_PROBE && junctionLocked);
 
   // Straight-dead-end memory survives the U-turn and clears after side exit.
   resetScenario();
@@ -437,10 +461,15 @@ int main()
   moveLFR(TURN_PWM, -TURN_PWM);
   assert(commandedLeft == TURN_PWM && commandedRight == -TURN_PWM);
 
-  // Every active tick reads sensors and stays inside the control period.
+  // FOLLOW, GAP and U-turn all receive one fresh sensor frame per tick.
   resetScenario();
-  repeat(centered, 5);
-  assert(sensorReadCount == 5);
+  tick(centered);
+  tick(0);
+  repeat(0, GAP_ALLOWANCE_TICKS);
+  assert(state == STATE_U_TURN);
+  tick(oneSensor(0));
+  assert(state == STATE_FOLLOW);
+  assert(sensorReadCount == GAP_ALLOWANCE_TICKS + 3);
   assert(navigationWorstSensorFrameMicros() == HOST_SENSOR_FRAME_US);
   assert(navigationWorstControlTickMicros() == HOST_SENSOR_FRAME_US);
   assert(navigationWorstControlTickMicros() <= CONTROL_PERIOD_US);
