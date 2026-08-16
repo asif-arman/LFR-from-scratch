@@ -11,7 +11,7 @@ constexpr uint8_t ANALOG_NOISE_FLOOR = 20;
 
 
 // ================================================================
-// FRAME-COUNTED CONFIRMATION AND TIMEOUTS
+// FRAME-COUNTED CONFIRMATION AND MINIMUM DURATIONS
 // ================================================================
 
 constexpr uint8_t LINE_CONFIRM_TICKS = 2;            // ~7 ms
@@ -22,11 +22,7 @@ constexpr uint8_t REACQUIRE_CONFIRM_TICKS = 3;       // ~10.5 ms
 constexpr uint8_t TURN_CENTER_LOST_TICKS = 2;        // ~7 ms
 constexpr uint8_t TURN_CENTER_CONFIRM_TICKS = 2;     // ~7 ms
 constexpr uint8_t TURN_MIN_TICKS = 8;                // ~28 ms
-constexpr uint16_t TURN_TIMEOUT_TICKS = 400;         // ~1.4 s
 constexpr uint8_t UTURN_MIN_TICKS = 72;              // ~252 ms
-constexpr uint16_t UTURN_TIMEOUT_TICKS = 515;        // ~1.8 s
-constexpr uint8_t REACQUIRE_TIMEOUT_TICKS = 80;      // ~280 ms
-constexpr uint8_t JUNCTION_PROBE_TIMEOUT_TICKS = 85; // ~298 ms
 constexpr uint8_t START_EXIT_CONFIRM_TICKS = 4;      // ~14 ms
 constexpr uint8_t FINISH_ARM_TICKS = 12;             // ~42 ms
 constexpr uint8_t FINISH_CONFIRM_TICKS = 8;          // ~28 ms
@@ -38,11 +34,15 @@ constexpr uint8_t FINISH_CONFIRM_TICKS = 8;          // ~28 ms
 
 constexpr uint8_t USABLE_LINE_MAX_ACTIVE = 7;
 constexpr uint8_t USABLE_LINE_MAX_SPAN = 7;
-constexpr uint8_t WIDE_FEATURE_MIN_ACTIVE = 8;
 constexpr uint8_t SIDE_CLUSTER_MIN_ACTIVE = 2;
 constexpr uint8_t JUNCTION_SIDE_MIN_SPAN = 7;
 constexpr uint8_t BOX_MIN_ACTIVE = 12;
 constexpr uint8_t BOX_MIN_SPAN = 12;
+
+// A disappearing line is a directed sharp corner only after its calibrated
+// position reached an outer sensor region. Centered loss remains a gap.
+constexpr int16_t RIGHT_EDGE_MAX_POSITION = 350; // near S0..S3
+constexpr int16_t LEFT_EDGE_MIN_POSITION = 950;  // near S10..S13
 
 
 // ================================================================
@@ -51,7 +51,6 @@ constexpr uint8_t BOX_MIN_SPAN = 12;
 
 constexpr uint8_t GAP_MAX_PWM = 75;
 constexpr uint8_t JUNCTION_CRAWL_PWM = 80;
-constexpr uint8_t REACQUIRE_PWM = 90;
 constexpr uint8_t START_BOX_EXIT_PWM = 95;
 constexpr uint8_t TURN_PWM = 100;
 constexpr uint8_t UTURN_PWM = 110;

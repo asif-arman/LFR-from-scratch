@@ -35,7 +35,7 @@ enum RoutePriorityOrder : uint8_t
 extern uint8_t kpX100;
 extern uint8_t kdX100;
 
-// Default: 100 PWM. Controls normal PD speed. Increase for more speed after
+// Default: 200 PWM. Controls normal PD speed. Increase for more speed after
 // the robot is stable; decrease if it overshoots or loses the line.
 extern uint8_t baseSpeed;
 
