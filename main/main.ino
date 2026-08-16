@@ -184,7 +184,7 @@ void loop()
     stopMotors();
     if (now - modeStartedAt >= RESULT_DISPLAY_MS ||
         buttonEvent == BUTTON_LEFT_DOUBLE_CLICK ||
-        buttonEvent == BUTTON_RIGHT_DOUBLE_CLICK)
+        buttonEvent == BUTTON_RIGHT_CLICK)
     {
       returnToMenu();
     }

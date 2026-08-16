@@ -27,7 +27,8 @@ enum NavState : uint8_t
 enum ReacquireMotion : uint8_t
 {
   REACQUIRE_FORWARD,
-  REACQUIRE_TURN
+  REACQUIRE_TURN,
+  REACQUIRE_U_TURN
 };
 
 
@@ -44,7 +45,8 @@ static NavigationResult terminalResult = NAVIGATION_ACTIVE;
 static uint32_t nextControlAtMicros = 0;
 static uint16_t worstSensorFrameMicros = 0;
 static uint16_t worstControlTickMicros = 0;
-static uint16_t stateTicks = 0;
+static uint32_t gapStartedAtMillis = 0;
+static uint32_t turnBlankStartedAtMillis = 0;
 
 static int16_t previousError = 0;
 static bool previousErrorValid = false;
@@ -69,9 +71,6 @@ static bool sawLeft = false;
 static bool sawStraight = false;
 static bool sawRight = false;
 static bool junctionLocked = false;
-
-static RouteDirection lastChosenRoute = ROUTE_NONE;
-static bool avoidStraightAtNextJunction = false;
 
 static int8_t turnDirection = 1;
 static uint8_t oldCenterAbsentCount = 0;
@@ -200,6 +199,20 @@ static SensorFrameKind classifySensorFrame(uint16_t pattern)
 }
 
 
+static bool isTurnCaptureLine(uint16_t pattern,
+                              SensorFrameKind frameKind)
+{
+  if (frameKind == FRAME_NORMAL_LINE) return true;
+
+  // A thick line can be classified as a wide feature even though it is the
+  // outgoing corner line. One strong contiguous group touching the centre is
+  // safe to capture; separated groups remain junction evidence.
+  return patternGroups(pattern) == 1 &&
+      activeCount(pattern) <= TURN_CAPTURE_MAX_ACTIVE &&
+      centerSeesLine(pattern);
+}
+
+
 static void resetPd()
 {
   previousError = 0;
@@ -246,6 +259,18 @@ static void mixPdCorrection(int16_t correction,
 }
 
 
+static uint8_t pdDriveSpeed(int16_t position, uint8_t speedCap)
+{
+  int16_t error = calculateLineError(position);
+  if (error < 0) error = -error;
+  uint8_t correctionSpeed = baseSpeed;
+  if (error >= OUTER_ERROR_THRESHOLD) correctionSpeed = OUTER_ERROR_PWM;
+  else if (error >= MODERATE_ERROR_THRESHOLD)
+    correctionSpeed = MODERATE_ERROR_PWM;
+  return min(speedCap, correctionSpeed);
+}
+
+
 static void applyPd(int16_t position, uint8_t speed)
 {
   if (position < 0)
@@ -264,6 +289,7 @@ static void applyPd(int16_t position, uint8_t speed)
   previousError = error;
   previousErrorValid = true;
 
+  speed = pdDriveSpeed(position, speed);
   int16_t left;
   int16_t right;
   mixPdCorrection((int16_t)correction, speed, left, right);
@@ -294,12 +320,6 @@ static bool lastLineWasSharpLeft()
 }
 
 
-static void incrementStateTicks()
-{
-  if (stateTicks < 65535U) stateTicks++;
-}
-
-
 static void resetJunctionDetection()
 {
   leftBranchFrames = 0;
@@ -314,8 +334,6 @@ static void safeStop(NavigationResult result)
   resetPd();
   state = STATE_STOPPED;
   terminalResult = result;
-  lastChosenRoute = ROUTE_NONE;
-  avoidStraightAtNextJunction = false;
   junctionLocked = false;
 }
 
@@ -323,7 +341,6 @@ static void safeStop(NavigationResult result)
 static void setReacquireState(ReacquireMotion motion)
 {
   state = STATE_REACQUIRE;
-  stateTicks = 0;
   reacquireStableCount = 0;
   reacquireMotion = motion;
   resetPd();
@@ -333,26 +350,17 @@ static void setReacquireState(ReacquireMotion motion)
 static void resumeFollowWithPd(int16_t linePosition)
 {
   state = STATE_FOLLOW;
-  stateTicks = 0;
   resetPd();
   applyPd(linePosition, baseSpeed);
 }
 
 
-static void beginActiveReacquire(ReacquireMotion motion,
-                                 int16_t linePosition)
+static void beginBrakeReacquire(ReacquireMotion motion)
 {
-  // A usable line overrides loss recovery immediately. Junction turns keep
-  // REACQUIRE only so their three-frame physical-exit lock can be cleared.
-  if (!junctionLocked)
-  {
-    resumeFollowWithPd(linePosition);
-    return;
-  }
-
+  // A signed pivot has rotational momentum. Brake for this control interval;
+  // the next fresh frame starts capped PD instead of jumping straight to 200.
   setReacquireState(motion);
-  applyPd(linePosition, baseSpeed);
-  reacquireStableCount = 1;
+  brakeMotors();
 }
 
 
@@ -375,10 +383,10 @@ static void beginTurn(RouteDirection route,
 {
   turnDirection = route == ROUTE_LEFT ? -1 : 1;
   state = STATE_TURN;
-  stateTicks = 0;
   oldCenterAbsentCount = min(confirmedAbsentFrames,
                              TURN_CENTER_LOST_TICKS);
   oldCenterWasLeft = oldCenterAbsentCount >= TURN_CENTER_LOST_TICKS;
+  turnBlankStartedAtMillis = confirmedAbsentFrames == 0 ? 0 : millis();
   lastForwardValid = false;
   resetPd();
   commandTurn();
@@ -389,7 +397,6 @@ static void beginUTurn(bool oldLineAlreadyGone)
 {
   turnDirection = lastLineSide < 0 ? -1 : 1;
   state = STATE_U_TURN;
-  stateTicks = 0;
   oldCenterAbsentCount = oldLineAlreadyGone ? TURN_CENTER_LOST_TICKS : 0;
   oldCenterWasLeft = oldLineAlreadyGone;
   lastForwardValid = false;
@@ -424,7 +431,7 @@ static void beginGap()
   gapLeft = constrain(gapLeft, 0, 255);
   gapRight = constrain(gapRight, 0, 255);
   state = STATE_GAP;
-  stateTicks = 0;
+  gapStartedAtMillis = millis();
   resetPd();
   moveLFR(gapLeft, gapRight);
 }
@@ -433,7 +440,6 @@ static void beginGap()
 static void beginJunctionProbe(uint16_t pattern)
 {
   state = STATE_JUNCTION_PROBE;
-  stateTicks = 0;
   junctionLocked = true;
   sawLeft = leftBranchFrames >= SIDE_CONFIRM_TICKS;
   sawRight = rightBranchFrames >= SIDE_CONFIRM_TICKS;
@@ -448,18 +454,6 @@ static void beginJunctionProbe(uint16_t pattern)
 }
 
 
-static bool leftRanksBeforeRight()
-{
-  for (uint8_t index = 0; index < 3; index++)
-  {
-    const RouteDirection route = settingsPriorityAt(index);
-    if (route == ROUTE_LEFT) return true;
-    if (route == ROUTE_RIGHT) return false;
-  }
-  return true;
-}
-
-
 static bool routeIsAvailable(RouteDirection route)
 {
   if (route == ROUTE_LEFT) return sawLeft;
@@ -471,18 +465,6 @@ static bool routeIsAvailable(RouteDirection route)
 
 static RouteDirection chooseRoute()
 {
-  if (avoidStraightAtNextJunction)
-  {
-    const RouteDirection firstSide = leftRanksBeforeRight() ?
-        ROUTE_LEFT : ROUTE_RIGHT;
-    const RouteDirection secondSide = firstSide == ROUTE_LEFT ?
-        ROUTE_RIGHT : ROUTE_LEFT;
-    if (routeIsAvailable(firstSide)) return firstSide;
-    if (routeIsAvailable(secondSide)) return secondSide;
-    if (routeIsAvailable(ROUTE_STRAIGHT)) return ROUTE_STRAIGHT;
-    return ROUTE_NONE;
-  }
-
   for (uint8_t index = 0; index < 3; index++)
   {
     const RouteDirection route = settingsPriorityAt(index);
@@ -496,7 +478,6 @@ static bool commitRoute(RouteDirection route, int16_t linePosition)
 {
   if (route == ROUTE_NONE) return false;
 
-  lastChosenRoute = route;
   if (route == ROUTE_LEFT || route == ROUTE_RIGHT)
   {
     beginTurn(route, linePosition < 0 ? TURN_CENTER_LOST_TICKS : 0);
@@ -523,11 +504,6 @@ static bool finishJunctionProbe(int16_t linePosition)
 
 static void clearJunctionLock()
 {
-  if (avoidStraightAtNextJunction &&
-      (lastChosenRoute == ROUTE_LEFT || lastChosenRoute == ROUTE_RIGHT))
-  {
-    avoidStraightAtNextJunction = false;
-  }
   junctionLocked = false;
   sawLeft = false;
   sawStraight = false;
@@ -570,12 +546,13 @@ static NavigationResult tickFollow(uint16_t pattern,
   {
     if (!junctionLocked && lastLineWasSharpRight())
     {
-      beginTurn(ROUTE_RIGHT, 1);
+      // The all-white frame proves that the old edge line has left the array.
+      beginTurn(ROUTE_RIGHT, TURN_CENTER_LOST_TICKS);
       return NAVIGATION_ACTIVE;
     }
     if (!junctionLocked && lastLineWasSharpLeft())
     {
-      beginTurn(ROUTE_LEFT, 1);
+      beginTurn(ROUTE_LEFT, TURN_CENTER_LOST_TICKS);
       return NAVIGATION_ACTIVE;
     }
     beginGap();
@@ -625,7 +602,6 @@ static NavigationResult tickGap(uint16_t pattern,
                                 SensorFrameKind frameKind,
                                 int16_t linePosition)
 {
-  incrementStateTicks();
   if (frameKind == FRAME_NORMAL_LINE)
   {
     // One dot is enough: leave GAP now, so the next white frame starts a
@@ -640,7 +616,9 @@ static NavigationResult tickGap(uint16_t pattern,
     return NAVIGATION_ACTIVE;
   }
 
-  if (stateTicks >= GAP_ALLOWANCE_TICKS)
+  // Milliseconds make every dot independent of sensor/loop timing. Only one
+  // uninterrupted 200 ms blank interval is a true lost-line condition.
+  if ((uint32_t)(millis() - gapStartedAtMillis) >= GAP_ALLOWANCE_MS)
   {
     if (junctionLocked)
     {
@@ -648,8 +626,6 @@ static NavigationResult tickGap(uint16_t pattern,
       moveLFR(JUNCTION_CRAWL_PWM, JUNCTION_CRAWL_PWM);
       return NAVIGATION_ACTIVE;
     }
-    if (lastChosenRoute == ROUTE_STRAIGHT)
-      avoidStraightAtNextJunction = true;
     beginUTurn(true);
     return NAVIGATION_ACTIVE;
   }
@@ -706,6 +682,13 @@ static NavigationResult tickTurn(uint16_t pattern,
                                  SensorFrameKind frameKind,
                                  int16_t linePosition)
 {
+  if (pattern == 0)
+  {
+    if (turnBlankStartedAtMillis == 0)
+      turnBlankStartedAtMillis = millis();
+  }
+  else turnBlankStartedAtMillis = 0;
+
   if (!oldCenterWasLeft)
   {
     if (!centerSeesLine(pattern))
@@ -718,11 +701,30 @@ static NavigationResult tickTurn(uint16_t pattern,
     else oldCenterAbsentCount = 0;
   }
 
-  if (oldCenterWasLeft && frameKind == FRAME_NORMAL_LINE)
+  if (oldCenterWasLeft && linePosition >= 0 &&
+      isTurnCaptureLine(pattern, frameKind))
   {
-    // Once the old center is gone, the first usable line anywhere on the
-    // array is the outgoing line. PD corrects it before the pivot overshoots.
-    beginActiveReacquire(REACQUIRE_TURN, linePosition);
+    // A centred thick corner can look like a junction for one frame. Capture
+    // it now, brake rotational momentum, then let capped PD settle the robot.
+    beginBrakeReacquire(REACQUIRE_TURN);
+    return NAVIGATION_ACTIVE;
+  }
+
+  if (frameKind == FRAME_JUNCTION_FEATURE)
+  {
+    // A junction is line evidence, never permission to keep rotating or to
+    // escalate loss recovery. Let the normal junction chooser handle it.
+    resetJunctionDetection();
+    beginJunctionProbe(pattern);
+    return NAVIGATION_ACTIVE;
+  }
+
+  if (pattern == 0 && turnBlankStartedAtMillis != 0 &&
+      (uint32_t)(millis() - turnBlankStartedAtMillis) >= GAP_ALLOWANCE_MS)
+  {
+    // An isolated edge dot may suggest a corner briefly, but continuous blank
+    // sensors must not leave TURN latched forever. It is now confirmed loss.
+    beginUTurn(true);
     return NAVIGATION_ACTIVE;
   }
 
@@ -735,13 +737,6 @@ static NavigationResult tickUTurn(uint16_t pattern,
                                   SensorFrameKind frameKind,
                                   int16_t linePosition)
 {
-  if (frameKind == FRAME_JUNCTION_FEATURE)
-  {
-    resetJunctionDetection();
-    beginJunctionProbe(pattern);
-    return NAVIGATION_ACTIVE;
-  }
-
   if (!oldCenterWasLeft)
   {
     if (!centerSeesLine(pattern))
@@ -754,11 +749,19 @@ static NavigationResult tickUTurn(uint16_t pattern,
     else oldCenterAbsentCount = 0;
   }
 
-  if (oldCenterWasLeft && frameKind == FRAME_NORMAL_LINE)
+  if (oldCenterWasLeft && linePosition >= 0 &&
+      isTurnCaptureLine(pattern, frameKind))
   {
-    // GAP already proved the departed line absent. Never rotate through a
-    // newly found usable line while waiting for a timer or center sensor.
-    resumeFollowWithPd(linePosition);
+    // A newly encountered line always wins over loss recovery. Brake this
+    // tick so the U-turn cannot carry the robot across it at speed.
+    beginBrakeReacquire(REACQUIRE_U_TURN);
+    return NAVIGATION_ACTIVE;
+  }
+
+  if (frameKind == FRAME_JUNCTION_FEATURE)
+  {
+    resetJunctionDetection();
+    beginJunctionProbe(pattern);
     return NAVIGATION_ACTIVE;
   }
 
@@ -784,7 +787,6 @@ static NavigationResult tickReacquire(uint16_t pattern,
         finishArmTicks = 0;
         finishArmed = false;
         state = STATE_FOLLOW;
-        stateTicks = 0;
         resetPd();
       }
     }
@@ -796,22 +798,21 @@ static NavigationResult tickReacquire(uint16_t pattern,
     return NAVIGATION_ACTIVE;
   }
 
-  if (frameKind == FRAME_NORMAL_LINE)
+  const bool capturedLine = linePosition >= 0 &&
+      (frameKind == FRAME_NORMAL_LINE ||
+       reacquireMotion == REACQUIRE_TURN ||
+       reacquireMotion == REACQUIRE_U_TURN);
+  if (capturedLine)
   {
-    if (!junctionLocked)
-    {
-      resumeFollowWithPd(linePosition);
-      return NAVIGATION_ACTIVE;
-    }
-
-    applyPd(linePosition, baseSpeed);
+    // The cap is temporary: it removes pivot momentum without changing the
+    // user's saved 200 straight-line speed. Three fresh frames prove stability.
+    applyPd(linePosition, REACQUIRE_PWM);
     if (reacquireStableCount < REACQUIRE_CONFIRM_TICKS)
       reacquireStableCount++;
     if (reacquireStableCount >= REACQUIRE_CONFIRM_TICKS)
     {
       if (junctionLocked) clearJunctionLock();
       state = STATE_FOLLOW;
-      stateTicks = 0;
       resetPd();
     }
     return NAVIGATION_ACTIVE;
@@ -826,6 +827,7 @@ static NavigationResult tickReacquire(uint16_t pattern,
 
   reacquireStableCount = 0;
   if (reacquireMotion == REACQUIRE_TURN) commandTurn();
+  else if (reacquireMotion == REACQUIRE_U_TURN) commandUTurn();
   else moveLFR(JUNCTION_CRAWL_PWM, JUNCTION_CRAWL_PWM);
   return NAVIGATION_ACTIVE;
 }
@@ -835,7 +837,8 @@ void navigationStart()
 {
   state = boxMode ? STATE_REACQUIRE : STATE_FOLLOW;
   terminalResult = NAVIGATION_ACTIVE;
-  stateTicks = 0;
+  gapStartedAtMillis = 0;
+  turnBlankStartedAtMillis = 0;
   lastForwardLeft = 0;
   lastForwardRight = 0;
   lastForwardValid = false;
@@ -844,8 +847,6 @@ void navigationStart()
   reacquireStableCount = 0;
   reacquireMotion = REACQUIRE_FORWARD;
   junctionLocked = false;
-  lastChosenRoute = ROUTE_NONE;
-  avoidStraightAtNextJunction = false;
   oldCenterAbsentCount = 0;
   oldCenterWasLeft = false;
   startBoxPending = boxMode;
@@ -895,9 +896,14 @@ NavigationResult navigationTick(uint16_t sensorValues[])
 
   const uint16_t pattern = makeSensorPattern(sensorValues);
   const SensorFrameKind frameKind = classifySensorFrame(pattern);
-  const int16_t linePosition = frameKind == FRAME_NORMAL_LINE ?
+  // Classify every fresh frame before motion. During a pivot, calculate a
+  // position for a strong centred thick line too, so it cannot be ignored.
+  const bool turnCaptureLine = isTurnCaptureLine(pattern, frameKind);
+  const int16_t linePosition =
+      (frameKind == FRAME_NORMAL_LINE || turnCaptureLine) ?
       calculateAnalogLinePosition(sensorValues) : -1;
-  if (linePosition >= 0) rememberOrdinaryLine(linePosition);
+  if (frameKind == FRAME_NORMAL_LINE && linePosition >= 0)
+    rememberOrdinaryLine(linePosition);
 
   NavigationResult result = NAVIGATION_ACTIVE;
   if (updateFinishBox(pattern))

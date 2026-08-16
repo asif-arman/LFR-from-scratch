@@ -18,8 +18,14 @@ using std::uint32_t;
 #define A6 20
 #define A7 21
 
+#define LOW 0
+#define HIGH 1
+#define INPUT_PULLUP 2
+
 uint32_t millis();
 uint32_t micros();
+void pinMode(uint8_t pin, uint8_t mode);
+int digitalRead(uint8_t pin);
 
 template <typename T>
 T min(T left, T right)

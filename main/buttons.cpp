@@ -7,8 +7,8 @@
 constexpr uint16_t DEBOUNCE_MS = 25;
 
 
-// Default: 350 ms. Maximum LEFT/RIGHT double-click gap. Increase if double
-// clicks are hard to perform; decrease if separate clicks combine accidentally.
+// Default: 350 ms. Maximum LEFT double-click gap. RIGHT deliberately uses a
+// single debounced press because it is the primary Enter/Edit/OK control.
 constexpr uint16_t DOUBLE_CLICK_MS = 350;
 
 
@@ -26,9 +26,8 @@ static uint8_t stableMask = 0;
 static uint32_t rawChangedAt = 0;
 
 
-// Zero means that no first click is currently waiting.
+// Zero means that no first LEFT click is currently waiting.
 static uint32_t firstLeftClickAt = 0;
-static uint32_t firstRightClickAt = 0;
 
 
 // Read all four physical buttons into one byte.
@@ -76,6 +75,7 @@ void buttonsInit()
   stableMask = rawMask;
 
   rawChangedAt = millis();
+  firstLeftClickAt = 0;
 }
 
 
@@ -95,17 +95,6 @@ ButtonEvent readButtonEvent()
   )
   {
     firstLeftClickAt = 0;
-  }
-
-
-  // Remove an unfinished RIGHT click when its
-  // double-click time expires.
-  if (
-      firstRightClickAt != 0 and
-      now - firstRightClickAt > DOUBLE_CLICK_MS
-  )
-  {
-    firstRightClickAt = 0;
   }
 
 
@@ -171,21 +160,11 @@ ButtonEvent readButtonEvent()
   }
 
 
-  // RIGHT uses double-click.
+  // RIGHT emits exactly once on its debounced press edge. Holding it cannot
+  // repeat because stableMask does not change again until physical release.
   if (pressed & RIGHT_MASK)
   {
-    if (
-        firstRightClickAt != 0 and
-        now - firstRightClickAt <= DOUBLE_CLICK_MS
-    )
-    {
-      firstRightClickAt = 0;
-
-      return BUTTON_RIGHT_DOUBLE_CLICK;
-    }
-
-    // This was only the first click.
-    firstRightClickAt = now;
+    return BUTTON_RIGHT_CLICK;
   }
 
 

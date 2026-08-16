@@ -13,8 +13,8 @@ void moveLFR(
 
 void stopMotors();
 
-// Actively brake both L298N channels. Navigation uses this at the exact
-// forward-probe deadline before it changes to a recovery state.
+// Actively brake both L298N channels. Navigation uses this for one control
+// tick when a pivot finds its outgoing line, removing rotational momentum.
 void brakeMotors();
 
 

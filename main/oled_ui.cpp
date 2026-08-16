@@ -109,7 +109,7 @@ static void drawMainMenu()
   oled.print(F("SENSOR VALUES"));
 
   oled.setCursor(0, 7);
-  oled.print(F("R2 ENTER"));
+  oled.print(F("R ENTER"));
 }
 
 
@@ -175,7 +175,7 @@ static void drawTuningMenu()
   }
 
   oled.setCursor(0, 7);
-  oled.print(F("R2 EDIT L2 BACK"));
+  oled.print(F("R EDIT L2 BACK"));
 }
 
 
@@ -253,7 +253,7 @@ static void drawEditScreen()
   oled.setCursor(0, 6);
   oled.print(F("UP/DOWN CHANGE"));
   oled.setCursor(0, 7);
-  oled.print(F("R2 OK L2 CANCEL"));
+  oled.print(F("R OK L2 CANCEL"));
 }
 
 
@@ -347,7 +347,7 @@ UiAction uiHandleButton(ButtonEvent event)
       mainItem = (mainItem + 1) % MAIN_ITEM_COUNT;
       drawMainMenu();
     }
-    else if (event == BUTTON_RIGHT_DOUBLE_CLICK)
+    else if (event == BUTTON_RIGHT_CLICK)
     {
       if (mainItem == MAIN_START_RUN) return UI_START_RUN;
       if (mainItem == MAIN_TUNING)
@@ -380,7 +380,7 @@ UiAction uiHandleButton(ButtonEvent event)
     {
       uiReturnToMain();
     }
-    else if (event == BUTTON_RIGHT_DOUBLE_CLICK)
+    else if (event == BUTTON_RIGHT_CLICK)
     {
       if (tuningItem == TUNE_CALIBRATE)
       {
@@ -413,7 +413,7 @@ UiAction uiHandleButton(ButtonEvent event)
       currentScreen = SCREEN_TUNING;
       drawTuningMenu();
     }
-    else if (event == BUTTON_RIGHT_DOUBLE_CLICK)
+    else if (event == BUTTON_RIGHT_CLICK)
     {
       if (tuningItem == TUNE_THRESHOLD)
       {
