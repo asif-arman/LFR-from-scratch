@@ -5,8 +5,8 @@
 
 
 uint8_t kpX100 = 30;
-uint8_t kdX100 = 8;
-uint8_t baseSpeed = 160;
+uint8_t kdX100 = 15;
+uint8_t baseSpeed = 130;
 uint16_t sensorThreshold = 400;
 uint8_t routePriority = PRIORITY_STRAIGHT_LEFT_RIGHT;
 bool boxMode = false;
@@ -21,7 +21,7 @@ constexpr uint8_t CALIBRATION_VALID_MASK = 1 << 0;
 constexpr uint8_t BOX_MODE_MASK = 1 << 4;
 constexpr uint8_t TUNING_VERSION_SHIFT = 1;
 constexpr uint8_t TUNING_VERSION_MASK = 0x0E;
-constexpr uint8_t CURRENT_TUNING_VERSION = 1;
+constexpr uint8_t CURRENT_TUNING_VERSION = 2;
 
 
 // EEPROM byte layout (packed, 67 bytes total):
@@ -48,7 +48,8 @@ static_assert(sizeof(SettingsRecord) == 67, "Unexpected EEPROM layout");
 
 
 // Version 2 is read only for migration. Midpoint-only calibration cannot
-// normalize analog strength, so tuning is retained but calibration is not.
+// normalize analog strength, so calibration is invalidated; route policy,
+// threshold and box mode survive while motion tuning moves to the safe baseline.
 struct __attribute__((packed)) SettingsRecordV2
 {
   uint16_t magic;
@@ -108,8 +109,8 @@ static void writeRecord(SettingsRecord &record)
 static void restoreDefaults()
 {
   kpX100 = 30;
-  kdX100 = 8;
-  baseSpeed = 160;
+  kdX100 = 15;
+  baseSpeed = 130;
   sensorThreshold = 400;
   routePriority = PRIORITY_STRAIGHT_LEFT_RIGHT;
   boxMode = false;
@@ -172,11 +173,9 @@ void settingsLoad()
     restoreDefaults();
     if (oldValid)
     {
-      kpX100 = oldRecord.kp;
-      kdX100 = oldRecord.kd;
-      baseSpeed = oldRecord.speed;
       sensorThreshold = oldRecord.threshold;
       routePriority = oldRecord.priority;
+      boxMode = (oldRecord.flags & BOX_MODE_MASK) != 0;
       settingsSaveIfChanged();
     }
     return;
@@ -204,8 +203,8 @@ void settingsLoad()
     // One-time tuning migration: preserve calibration, route policy,
     // thresholds and record layout; replace only the unstable motion tuning.
     kpX100 = 30;
-    kdX100 = 8;
-    baseSpeed = 160;
+    kdX100 = 15;
+    baseSpeed = 130;
     record.kp = kpX100;
     record.kd = kdX100;
     record.speed = baseSpeed;

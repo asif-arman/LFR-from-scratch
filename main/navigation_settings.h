@@ -24,7 +24,11 @@ constexpr uint8_t FINISH_ARM_TICKS = 12;           // ~42 ms narrow travel
 constexpr uint8_t FINISH_CONFIRM_TICKS = 8;        // ~28 ms
 constexpr uint8_t TURN_CENTER_CONFIRM_TICKS = 2;   // ~7 ms
 constexpr uint8_t JUNCTION_EXIT_CONFIRM_TICKS = 4; // ~14 ms
-constexpr uint8_t TURN_MIN_TICKS = 10;             // ~35 ms
+constexpr uint8_t TURN_CENTER_LOST_TICKS = 2;       // ~7 ms
+constexpr uint8_t TURN_SIDE_CAPTURE_TICKS = 2;      // ~7 ms
+constexpr uint8_t TURN_REACQUIRE_TICKS = 3;         // ~10.5 ms
+constexpr uint8_t TURN_BRAKE_TICKS = 2;             // ~7 ms
+constexpr uint8_t TURN_FORWARD_CONFIRM_TICKS = 3;   // ~10.5 ms
 constexpr uint16_t TURN_TIMEOUT_TICKS = 400;        // ~1.4 s
 constexpr uint8_t UTURN_MIN_TICKS = 72;             // ~252 ms
 constexpr uint16_t UTURN_TIMEOUT_TICKS = 515;       // ~1.8 s
@@ -48,9 +52,7 @@ constexpr uint8_t BOX_MIN_SPAN = 12;
 
 // Narrow exits outside this central error are branches, not straight exits.
 constexpr uint16_t STRAIGHT_CENTER_ERROR_LIMIT = 180;
-constexpr uint16_t CONTINUITY_CENTER_ERROR_LIMIT = 120;
 
-constexpr uint16_t TURN_CENTER_ERROR_LIMIT = 150;
 constexpr uint16_t TURN_TREND_MIN_STEP = 40;
 constexpr uint8_t TURN_OUTWARD_CONFIRM = 2;
 constexpr uint16_t TURN_LOSS_ERROR_LIMIT = 350;
@@ -74,18 +76,9 @@ constexpr uint8_t TURN_PWM = 120;
 constexpr uint8_t UTURN_PWM = 130;
 
 constexpr uint8_t TURN_REACQUIRE_PWM = 100;
-constexpr uint8_t TURN_CROSS_CORRECTION_PWM = 90;
 
 constexpr uint8_t LEFT_MOTOR_EFFECTIVE_MIN_PWM = 90;
 constexpr uint8_t RIGHT_MOTOR_EFFECTIVE_MIN_PWM = 90;
-// Ordinary forward acceleration is limited; urgent inside-wheel reduction and
-// signed correction are immediate. The motor guard protects sign reversals.
-constexpr uint8_t FOLLOW_PWM_RISE_STEP = 36;
-
-// FOLLOW may reverse only the inside wheel, only for a severe line error, and
-// only up to this bounded magnitude.
-constexpr uint16_t FOLLOW_REVERSE_START_ERROR = 350;
-constexpr uint8_t FOLLOW_REVERSE_MAX_PWM = 110;
 
 
 // ================================================================
@@ -96,8 +89,3 @@ constexpr uint8_t FOLLOW_REVERSE_MAX_PWM = 110;
 constexpr uint16_t ADAPTIVE_SPEED_START_ERROR = 100;
 constexpr uint8_t ADAPTIVE_SPEED_REDUCTION_DIVISOR = 5;
 constexpr uint8_t ADAPTIVE_SPEED_MAX_REDUCTION = 70;
-
-// A consistently outward-moving approach receives extra slowdown.
-constexpr uint16_t TURN_SLOW_START_ERROR = 250;
-constexpr uint8_t TURN_APPROACH_MIN_PWM = 120;
-constexpr uint8_t TURN_APPROACH_REDUCTION_DIVISOR = 4;

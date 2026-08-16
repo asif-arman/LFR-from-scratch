@@ -35,6 +35,16 @@ enum ProbeReason : uint8_t
 };
 
 
+enum TurnPhase : uint8_t
+{
+  TURN_LEAVE_CENTER,
+  TURN_CAPTURE_SIDE,
+  TURN_REACQUIRE_CENTER,
+  TURN_BRAKE,
+  TURN_FORWARD_CONFIRM
+};
+
+
 static NavState state = STATE_STOPPED;
 static ProbeReason probeReason = PROBE_LOST_LINE;
 static NavigationResult terminalResult = NAVIGATION_ACTIVE;
@@ -55,8 +65,6 @@ static int8_t lastReliableSide = 1;
 static const uint16_t *frameSensorValues = 0;
 static int16_t gapProbeLeft = 0;
 static int16_t gapProbeRight = 0;
-static int16_t junctionIncomingError = 0;
-static bool junctionIncomingCentered = true;
 
 static int16_t recentErrors[3];
 static uint8_t recentErrorCount = 0;
@@ -74,15 +82,17 @@ static uint8_t straightRouteVotes = 0;
 static uint8_t rightRouteVotes = 0;
 
 static uint8_t junctionAvailableRoutes = 0;
-static uint8_t attemptedRoutes = 0;
 static RouteDirection selectedRoute = ROUTE_NONE;
 static bool junctionActive = false;
-static bool turnSawCenterLost = false;
-static bool uTurnAttempted = false;
 static bool lineIsInverse = false;
-static bool wideAreaCrawl = false;
 static bool startCleared = false;
 static bool finishArmed = false;
+static TurnPhase turnPhase = TURN_LEAVE_CENTER;
+static uint16_t turnTicks = 0;
+static uint8_t turnCenterLostCount = 0;
+static uint8_t turnSideCaptureCount = 0;
+static uint8_t turnBrakeCount = 0;
+static uint8_t routeCommitLostCount = 0;
 
 
 static uint8_t activeCount(uint16_t pattern)
@@ -327,30 +337,9 @@ static int16_t calculatePdLinePosition(uint16_t pattern)
 }
 
 
-static int16_t slewFollowPwm(int16_t previous,
-                             int16_t target,
-                             uint8_t effectiveMinimum)
+static int16_t effectiveForwardPwm(int16_t pwm, uint8_t effectiveMinimum)
 {
-  // A reduction, stop, or signed correction is urgent steering. Apply the
-  // requested target now; motorDirectionGuardCommand() still inserts the
-  // required zero interval if the electrical direction changes.
-  if (target <= previous || (target < 0) != (previous < 0)) return target;
-
-  // Only ordinary forward acceleration is softened.
-  if (target > 0)
-  {
-    if (previous <= 0) return min(target, (int16_t)effectiveMinimum);
-    if (target > previous + FOLLOW_PWM_RISE_STEP)
-      return previous + FOLLOW_PWM_RISE_STEP;
-  }
-  return target;
-}
-
-
-static int16_t effectiveMotorPwm(int16_t pwm, uint8_t effectiveMinimum)
-{
-  const uint16_t magnitude = pwm < 0 ? (uint16_t)-pwm : (uint16_t)pwm;
-  return magnitude > 0 && magnitude < effectiveMinimum ? 0 : pwm;
+  return pwm > 0 && pwm < effectiveMinimum ? 0 : pwm;
 }
 
 
@@ -366,21 +355,6 @@ static uint8_t calculateApproachSpeed(uint16_t absolute,
         (uint16_t)ADAPTIVE_SPEED_MAX_REDUCTION);
     approachSpeed = reduction >= approachSpeed ? 0 :
         approachSpeed - reduction;
-  }
-
-  if (speedLimit == 255 &&
-      outwardTrendCount >= TURN_OUTWARD_CONFIRM &&
-      absolute > TURN_SLOW_START_ERROR)
-  {
-    const uint16_t incomingSpeed = approachSpeed;
-    const uint16_t minimum = incomingSpeed > TURN_APPROACH_MIN_PWM ?
-        TURN_APPROACH_MIN_PWM : incomingSpeed;
-    const uint16_t reduction =
-        (absolute - TURN_SLOW_START_ERROR) /
-        TURN_APPROACH_REDUCTION_DIVISOR;
-    approachSpeed = reduction >= incomingSpeed ? 0 :
-        incomingSpeed - reduction;
-    if (approachSpeed < minimum) approachSpeed = minimum;
   }
 
   return approachSpeed;
@@ -414,21 +388,12 @@ static void applyPd(uint16_t pattern, uint8_t speedLimit = 255)
   const uint16_t absolute = absoluteError(error);
   const int16_t approachSpeed = calculateApproachSpeed(absolute, speedLimit);
 
-  const int16_t reverseLimit = absolute >= FOLLOW_REVERSE_START_ERROR ?
-      -(int16_t)FOLLOW_REVERSE_MAX_PWM : 0;
   int16_t leftPwm = constrain(approachSpeed + correction,
-                              reverseLimit, 255);
+                              0, 255);
   int16_t rightPwm = constrain(approachSpeed - correction,
-                               reverseLimit, 255);
-  leftPwm = effectiveMotorPwm(leftPwm, LEFT_MOTOR_EFFECTIVE_MIN_PWM);
-  rightPwm = effectiveMotorPwm(rightPwm, RIGHT_MOTOR_EFFECTIVE_MIN_PWM);
-  if (followMixerValid)
-  {
-    leftPwm = slewFollowPwm(previousFollowLeft, leftPwm,
-                            LEFT_MOTOR_EFFECTIVE_MIN_PWM);
-    rightPwm = slewFollowPwm(previousFollowRight, rightPwm,
-                             RIGHT_MOTOR_EFFECTIVE_MIN_PWM);
-  }
+                               0, 255);
+  leftPwm = effectiveForwardPwm(leftPwm, LEFT_MOTOR_EFFECTIVE_MIN_PWM);
+  rightPwm = effectiveForwardPwm(rightPwm, RIGHT_MOTOR_EFFECTIVE_MIN_PWM);
   previousFollowLeft = leftPwm;
   previousFollowRight = rightPwm;
   followMixerValid = true;
@@ -527,7 +492,6 @@ static bool updateInverseMode(uint16_t blackPattern)
       {
         state = STATE_FOLLOW;
         junctionAvailableRoutes = 0;
-        wideAreaCrawl = false;
         resetJunctionEvidence();
       }
       resetPd();
@@ -544,13 +508,6 @@ static bool updateInverseMode(uint16_t blackPattern)
 
 static void beginForwardProbe(ProbeReason reason)
 {
-  if (reason == PROBE_WIDE_FEATURE && previousErrorValid)
-  {
-    junctionIncomingError = previousError;
-    junctionIncomingCentered =
-        absoluteError(previousError) <= CONTINUITY_CENTER_ERROR_LIMIT;
-  }
-
   const int16_t probeLimit = min(baseSpeed, FORWARD_PROBE_MAX_PWM);
   if (followMixerValid)
   {
@@ -574,7 +531,6 @@ static void beginForwardProbe(ProbeReason reason)
   stateTicks = 0;
   probeNarrowConfirmCount = 0;
   finishCandidateTicks = 0;
-  wideAreaCrawl = false;
   if (junctionActive)
   {
     exitStableCount = 0;
@@ -607,17 +563,22 @@ static void beginRouteCommit()
   state = STATE_ROUTE_COMMIT;
   stateTicks = 0;
   exitStableCount = 0;
+  routeCommitLostCount = 0;
   resetPd();
 }
 
 
-static void beginTurn(RouteDirection route)
+static void beginTurn(RouteDirection route, bool centerAlreadyLost = false)
 {
   selectedRoute = route;
   state = STATE_TURN_TO_ROUTE;
   stateTicks = 0;
+  turnTicks = 0;
   centerStableCount = 0;
-  turnSawCenterLost = false;
+  turnCenterLostCount = 0;
+  turnSideCaptureCount = 0;
+  turnBrakeCount = 0;
+  turnPhase = centerAlreadyLost ? TURN_CAPTURE_SIDE : TURN_LEAVE_CENTER;
   resetPd();
   resetTurnIntent();
 }
@@ -634,36 +595,14 @@ static void beginUTurn()
 }
 
 
-static void chooseNextRoute()
+static void choosePriorityRoute()
 {
-  const uint8_t untried = junctionAvailableRoutes & ~attemptedRoutes;
-
-  RouteDirection continuityRoute = ROUTE_NONE;
-  if (junctionIncomingCentered && (untried & ROUTE_STRAIGHT))
-    continuityRoute = ROUTE_STRAIGHT;
-  else if (junctionIncomingError < -(int16_t)CONTINUITY_CENTER_ERROR_LIMIT &&
-           (untried & ROUTE_LEFT))
-    continuityRoute = ROUTE_LEFT;
-  else if (junctionIncomingError > (int16_t)CONTINUITY_CENTER_ERROR_LIMIT &&
-           (untried & ROUTE_RIGHT))
-    continuityRoute = ROUTE_RIGHT;
-
-  if (continuityRoute != ROUTE_NONE)
-  {
-    selectedRoute = continuityRoute;
-    attemptedRoutes |= continuityRoute;
-    if (continuityRoute == ROUTE_STRAIGHT) beginRouteCommit();
-    else beginTurn(continuityRoute);
-    return;
-  }
-
   for (uint8_t index = 0; index < 3; index++)
   {
     const RouteDirection route = settingsPriorityAt(index);
-    if (untried & route)
+    if (junctionAvailableRoutes & route)
     {
       selectedRoute = route;
-      attemptedRoutes |= route;
       if (route == ROUTE_STRAIGHT)
       {
         beginRouteCommit();
@@ -676,31 +615,18 @@ static void chooseNextRoute()
     }
   }
 
-  if (!uTurnAttempted)
-  {
-    uTurnAttempted = true;
-    beginUTurn();
-    return;
-  }
-
-  safeStop(NAVIGATION_LOST);
+  beginUTurn();
 }
 
 
 static void startJunction(uint8_t availableRoutes)
 {
-  if (previousErrorValid)
-  {
-    junctionIncomingError = previousError;
-    junctionIncomingCentered =
-        absoluteError(previousError) <= CONTINUITY_CENTER_ERROR_LIMIT;
-  }
   junctionActive = true;
+  // Freeze this mask. No later turn or exit frame may manufacture a route or
+  // replace the selected OLED-priority decision inside the same junction.
   junctionAvailableRoutes = availableRoutes;
-  attemptedRoutes = 0;
-  uTurnAttempted = false;
   resetJunctionEvidence();
-  chooseNextRoute();
+  choosePriorityRoute();
 }
 
 
@@ -708,9 +634,7 @@ static void clearJunctionAfterExit()
 {
   junctionActive = false;
   junctionAvailableRoutes = 0;
-  attemptedRoutes = 0;
   selectedRoute = ROUTE_NONE;
-  uTurnAttempted = false;
   resetJunctionEvidence();
 }
 
@@ -727,10 +651,8 @@ static NavigationResult tickFollow(uint16_t blackPattern, uint16_t pattern)
       const RouteDirection turnRoute = lastReliableSide < 0 ?
           ROUTE_LEFT : ROUTE_RIGHT;
       const int8_t direction = turnRoute == ROUTE_LEFT ? -1 : 1;
-      beginTurn(turnRoute);
-      // This transition was triggered by an all-clear frame, so the incoming
-      // centre line has already disappeared; do not wait to rediscover that.
-      turnSawCenterLost = true;
+      // The all-clear frame already proves the incoming centre line is gone.
+      beginTurn(turnRoute, true);
       moveLFR(direction * TURN_PWM, -direction * TURN_PWM);
       return NAVIGATION_ACTIVE;
     }
@@ -912,7 +834,6 @@ static NavigationResult tickForwardProbe(uint16_t pattern)
     return NAVIGATION_ACTIVE;
   }
 
-  wideAreaCrawl = count >= WIDE_FEATURE_MIN_ACTIVE;
   moveLFR(WIDE_AREA_CRAWL_PWM, WIDE_AREA_CRAWL_PWM);
   return NAVIGATION_ACTIVE;
 }
@@ -942,7 +863,6 @@ static NavigationResult tickProbeBrake(uint16_t pattern)
     // restarting its evidence window and crawl until a narrow/empty exit.
     state = STATE_FORWARD_PROBE;
     stateTicks = 0;
-    wideAreaCrawl = true;
     moveLFR(WIDE_AREA_CRAWL_PWM, WIDE_AREA_CRAWL_PWM);
     return NAVIGATION_ACTIVE;
   }
@@ -961,81 +881,115 @@ static NavigationResult tickProbeBrake(uint16_t pattern)
 static NavigationResult tickTurn(uint16_t pattern)
 {
   stateTicks++;
-
-  int8_t direction;
-  if (selectedRoute == ROUTE_LEFT)
-  {
-    direction = -1;
-  }
-  else if (selectedRoute == ROUTE_RIGHT)
-  {
-    direction = 1;
-  }
-  else direction = sideFromRecentHistory();
-
-  const bool narrow = isNarrowLine(pattern);
-  int16_t lineError = 0;
-  if (narrow)
-  {
-    lineError = calculateLineError(calculatePdLinePosition(pattern));
-  }
-
-  if (!centerSeesLine(pattern))
-  {
-    turnSawCenterLost = true;
-  }
-
-  const bool nearCenter = narrow &&
-      (centerSeesLine(pattern) ||
-       absoluteError(lineError) <= TURN_CENTER_ERROR_LIMIT);
-  if (turnSawCenterLost && nearCenter && stateTicks >= TURN_MIN_TICKS)
-  {
-    // End pivot torque immediately, then confirm with both wheels forward.
-    applyPd(pattern, REACQUIRE_FORWARD_PWM);
-    if (++centerStableCount >= TURN_CENTER_CONFIRM_TICKS)
-    {
-      beginRouteCommit();
-    }
-    return NAVIGATION_ACTIVE;
-  }
-  if (centerStableCount != 0)
-  {
-    centerStableCount = 0;
-    resetPd();
-  }
-
-  if (stateTicks >= TURN_TIMEOUT_TICKS)
+  if (turnTicks < 65535) turnTicks++;
+  if (turnTicks >= TURN_TIMEOUT_TICKS)
   {
     safeStop(NAVIGATION_LOST);
     return NAVIGATION_LOST;
   }
 
-  if (turnSawCenterLost && narrow)
+  const int8_t direction = selectedRoute == ROUTE_LEFT ? -1 : 1;
+  const bool expectedSide = isNarrowLine(pattern) &&
+      patternGroups(pattern) == 1 &&
+      (direction < 0 ? hasAdjacentCluster(pattern, 8, 13) :
+                       hasAdjacentCluster(pattern, 0, 5));
+
+  if (turnPhase == TURN_LEAVE_CENTER)
   {
-    const int16_t centerLimit = (int16_t)TURN_CENTER_ERROR_LIMIT;
-    const bool crossedCenter =
-        (direction < 0 && lineError > centerLimit) ||
-        (direction > 0 && lineError < -centerLimit);
-    if (crossedCenter)
+    if (!centerSeesLine(pattern))
     {
-      moveLFR(-direction * TURN_CROSS_CORRECTION_PWM,
-              direction * TURN_CROSS_CORRECTION_PWM);
-      return NAVIGATION_ACTIVE;
+      if (turnCenterLostCount < TURN_CENTER_LOST_TICKS)
+        turnCenterLostCount++;
+    }
+    else
+    {
+      turnCenterLostCount = 0;
     }
 
-    const bool onExpectedSide =
-        (direction < 0 && lineError < 0) ||
-        (direction > 0 && lineError > 0);
-    if (onExpectedSide)
-    {
-      moveLFR(direction * TURN_REACQUIRE_PWM,
-              -direction * TURN_REACQUIRE_PWM);
-      return NAVIGATION_ACTIVE;
-    }
+    if (turnCenterLostCount >= TURN_CENTER_LOST_TICKS)
+      turnPhase = TURN_CAPTURE_SIDE;
+    moveLFR(direction * TURN_PWM, -direction * TURN_PWM);
+    return NAVIGATION_ACTIVE;
   }
 
-  moveLFR(direction * TURN_PWM,
-          -direction * TURN_PWM);
+  if (turnPhase == TURN_CAPTURE_SIDE)
+  {
+    if (expectedSide)
+    {
+      if (turnSideCaptureCount < TURN_SIDE_CAPTURE_TICKS)
+        turnSideCaptureCount++;
+    }
+    else
+    {
+      turnSideCaptureCount = 0;
+    }
+
+    if (turnSideCaptureCount >= TURN_SIDE_CAPTURE_TICKS)
+    {
+      turnPhase = TURN_REACQUIRE_CENTER;
+      centerStableCount = 0;
+      moveLFR(direction * TURN_REACQUIRE_PWM,
+              -direction * TURN_REACQUIRE_PWM);
+    }
+    else
+    {
+      moveLFR(direction * TURN_PWM, -direction * TURN_PWM);
+    }
+    return NAVIGATION_ACTIVE;
+  }
+
+  if (turnPhase == TURN_REACQUIRE_CENTER)
+  {
+    if (isCredibleStraightContinuation(pattern))
+    {
+      if (centerStableCount < TURN_REACQUIRE_TICKS) centerStableCount++;
+      if (centerStableCount >= TURN_REACQUIRE_TICKS)
+      {
+        turnPhase = TURN_BRAKE;
+        turnBrakeCount = 1;
+        brakeMotors();
+        return NAVIGATION_ACTIVE;
+      }
+    }
+    else
+    {
+      centerStableCount = 0;
+    }
+
+    moveLFR(direction * TURN_REACQUIRE_PWM,
+            -direction * TURN_REACQUIRE_PWM);
+    return NAVIGATION_ACTIVE;
+  }
+
+  if (turnPhase == TURN_BRAKE)
+  {
+    brakeMotors();
+    if (turnBrakeCount < TURN_BRAKE_TICKS) turnBrakeCount++;
+    if (turnBrakeCount >= TURN_BRAKE_TICKS)
+    {
+      turnPhase = TURN_FORWARD_CONFIRM;
+      centerStableCount = 0;
+      resetPd();
+    }
+    return NAVIGATION_ACTIVE;
+  }
+
+  if (isCredibleStraightContinuation(pattern))
+  {
+    applyPd(pattern, REACQUIRE_FORWARD_PWM);
+    if (centerStableCount < TURN_FORWARD_CONFIRM_TICKS) centerStableCount++;
+    if (centerStableCount >= TURN_FORWARD_CONFIRM_TICKS)
+      beginRouteCommit();
+    return NAVIGATION_ACTIVE;
+  }
+
+  // The outgoing line was not stable after braking. Resume the same locked
+  // turn; no route detection or priority lookup occurs here.
+  centerStableCount = 0;
+  turnPhase = TURN_REACQUIRE_CENTER;
+  resetPd();
+  moveLFR(direction * TURN_REACQUIRE_PWM,
+          -direction * TURN_REACQUIRE_PWM);
   return NAVIGATION_ACTIVE;
 }
 
@@ -1043,23 +997,56 @@ static NavigationResult tickTurn(uint16_t pattern)
 static NavigationResult tickRouteCommit(uint16_t pattern)
 {
   stateTicks++;
-  if (pattern == 0)
+  const bool selectedTurn = selectedRoute == ROUTE_LEFT ||
+                            selectedRoute == ROUTE_RIGHT;
+  if (selectedTurn)
   {
-    beginForwardProbe(PROBE_LOST_LINE);
-    moveLFR(gapProbeLeft, gapProbeRight);
-    return NAVIGATION_ACTIVE;
+    if (turnTicks < 65535) turnTicks++;
+    if (turnTicks >= TURN_TIMEOUT_TICKS)
+    {
+      safeStop(NAVIGATION_LOST);
+      return NAVIGATION_LOST;
+    }
   }
 
-  if (isNarrowLine(pattern) && centerSeesLine(pattern))
+  if (isCredibleStraightContinuation(pattern))
   {
+    routeCommitLostCount = 0;
     if (exitStableCount < 255) exitStableCount++;
+    applyPd(pattern, REACQUIRE_FORWARD_PWM);
   }
   else
   {
     exitStableCount = 0;
-  }
+    resetPd();
 
-  applyPd(pattern);
+    if (selectedTurn)
+    {
+      const int8_t direction = selectedRoute == ROUTE_LEFT ? -1 : 1;
+      state = STATE_TURN_TO_ROUTE;
+      turnPhase = TURN_REACQUIRE_CENTER;
+      centerStableCount = 0;
+      moveLFR(direction * TURN_REACQUIRE_PWM,
+              -direction * TURN_REACQUIRE_PWM);
+      return NAVIGATION_ACTIVE;
+    }
+
+    if (pattern == 0)
+    {
+      if (routeCommitLostCount < LOSS_PROBE_TICKS) routeCommitLostCount++;
+      if (routeCommitLostCount >= LOSS_PROBE_TICKS)
+      {
+        beginUTurn();
+        return NAVIGATION_ACTIVE;
+      }
+      moveLFR(REACQUIRE_FORWARD_PWM, REACQUIRE_FORWARD_PWM);
+      return NAVIGATION_ACTIVE;
+    }
+
+    routeCommitLostCount = 0;
+    moveLFR(WIDE_AREA_CRAWL_PWM, WIDE_AREA_CRAWL_PWM);
+    return NAVIGATION_ACTIVE;
+  }
 
   if (exitStableCount >= JUNCTION_EXIT_CONFIRM_TICKS)
   {
@@ -1121,13 +1108,15 @@ void navigationStart()
   startCleared = !boxMode;
   finishArmed = false;
   lastReliableSide = 1;
-  junctionIncomingError = 0;
-  junctionIncomingCentered = true;
   junctionActive = false;
   junctionAvailableRoutes = 0;
-  attemptedRoutes = 0;
   selectedRoute = ROUTE_NONE;
-  uTurnAttempted = false;
+  turnPhase = TURN_LEAVE_CENTER;
+  turnTicks = 0;
+  turnCenterLostCount = 0;
+  turnSideCaptureCount = 0;
+  turnBrakeCount = 0;
+  routeCommitLostCount = 0;
   nextControlAtMicros = micros();
   worstSensorFrameMicros = 0;
   worstControlTickMicros = 0;
@@ -1142,7 +1131,6 @@ void navigationStop()
 {
   safeStop(NAVIGATION_ACTIVE);
   junctionActive = false;
-  attemptedRoutes = 0;
 }
 
 

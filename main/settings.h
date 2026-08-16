@@ -5,8 +5,8 @@
 #include "config.h"
 
 
-// Route bits are deliberately powers of two so available and attempted
-// directions fit in one byte.
+// Route bits are deliberately powers of two so a frozen availability mask
+// fits in one byte.
 enum RouteDirection : uint8_t
 {
   ROUTE_NONE = 0,
@@ -31,13 +31,13 @@ enum RoutePriorityOrder : uint8_t
 
 // KP default: 0.30. Controls present line-error response. Increase if steering
 // is weak; decrease if the robot oscillates.
-// KD default: 0.08. Controls damping from error change. Increase to suppress
+// KD default: 0.15. Controls damping from error change. Increase to suppress
 // overshoot; decrease if motor commands become noisy or twitchy.
 // Both use fixed-point hundredths: 30 means 0.30.
 extern uint8_t kpX100;
 extern uint8_t kdX100;
 
-// Default: 160 PWM. Controls normal PD speed. Increase for more speed after
+// Default: 130 PWM. Controls normal PD speed. Increase for more speed after
 // the robot is stable; decrease if it overshoots or loses the line.
 extern uint8_t baseSpeed;
 
@@ -45,8 +45,8 @@ extern uint8_t baseSpeed;
 // white is being read as black; decrease if black is being missed.
 extern uint16_t sensorThreshold;
 
-// Default: Straight > Left > Right. Controls which detected, untried branch
-// is selected first. Change it to match the required course strategy.
+// Default: Straight > Left > Right. The first detected branch in this strict
+// order is selected and remains locked until the junction has been exited.
 extern uint8_t routePriority;
 
 // Default: OFF. When enabled, RUN treats broad black regions as start/finish
