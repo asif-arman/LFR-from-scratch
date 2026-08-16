@@ -2,65 +2,68 @@
 #include "config.h"
 
 
-// Default: 25 ms. A button must remain stable this long. Increase if presses
-// bounce into duplicates; decrease if the controls feel unresponsive.
-constexpr uint16_t DEBOUNCE_MS = 25;
+// Each switch owns its debounce state, so bounce on one input cannot delay or
+// repeat another button. Twenty milliseconds is long enough for typical keys.
+constexpr uint16_t DEBOUNCE_MS = 20;
+constexpr uint16_t ACTION_LONG_PRESS_MS = 600;
 
 
-// Default: 350 ms. Maximum LEFT double-click gap. RIGHT deliberately uses a
-// single debounced press because it is the primary Enter/Edit/OK control.
-constexpr uint16_t DOUBLE_CLICK_MS = 350;
-
-
-// One bit represents one button.
-// This avoids four separate state arrays and saves SRAM.
-constexpr uint8_t UP_MASK = 1 << 0;
-constexpr uint8_t DOWN_MASK = 1 << 1;
-constexpr uint8_t LEFT_MASK = 1 << 2;
-constexpr uint8_t RIGHT_MASK = 1 << 3;
-
-
-static uint8_t rawMask = 0;
-static uint8_t stableMask = 0;
-
-static uint32_t rawChangedAt = 0;
-
-
-// Zero means that no first LEFT click is currently waiting.
-static uint32_t firstLeftClickAt = 0;
-
-
-// Read all four physical buttons into one byte.
-//
-// Because INPUT_PULLUP is used:
-//
-// LOW  = pressed
-// HIGH = released
-static uint8_t readPressedMask()
+struct ButtonState
 {
-  uint8_t mask = 0;
+  bool rawPressed;
+  bool stablePressed;
+  uint32_t rawChangedAt;
+};
 
-  if (digitalRead(BUTTON_UP_PIN) == LOW)
+
+enum ButtonEdge : uint8_t
+{
+  EDGE_NONE,
+  EDGE_PRESSED,
+  EDGE_RELEASED
+};
+
+
+static ButtonState upState = {};
+static ButtonState downState = {};
+static ButtonState actionState = {};
+static uint32_t actionPressedAt = 0;
+static bool actionLongEmitted = false;
+
+
+static bool pinIsPressed(uint8_t pin)
+{
+  return digitalRead(pin) == LOW;
+}
+
+
+static void initializeButton(ButtonState &button, uint8_t pin, uint32_t now)
+{
+  button.rawPressed = pinIsPressed(pin);
+  button.stablePressed = button.rawPressed;
+  button.rawChangedAt = now;
+}
+
+
+static ButtonEdge updateButton(ButtonState &button,
+                               uint8_t pin,
+                               uint32_t now)
+{
+  const bool pressed = pinIsPressed(pin);
+  if (pressed != button.rawPressed)
   {
-    mask |= UP_MASK;
+    button.rawPressed = pressed;
+    button.rawChangedAt = now;
   }
 
-  if (digitalRead(BUTTON_DOWN_PIN) == LOW)
+  if (button.stablePressed == button.rawPressed ||
+      (uint32_t)(now - button.rawChangedAt) < DEBOUNCE_MS)
   {
-    mask |= DOWN_MASK;
+    return EDGE_NONE;
   }
 
-  if (digitalRead(BUTTON_LEFT_PIN) == LOW)
-  {
-    mask |= LEFT_MASK;
-  }
-
-  if (digitalRead(BUTTON_RIGHT_PIN) == LOW)
-  {
-    mask |= RIGHT_MASK;
-  }
-
-  return mask;
+  button.stablePressed = button.rawPressed;
+  return button.stablePressed ? EDGE_PRESSED : EDGE_RELEASED;
 }
 
 
@@ -68,105 +71,47 @@ void buttonsInit()
 {
   pinMode(BUTTON_UP_PIN, INPUT_PULLUP);
   pinMode(BUTTON_DOWN_PIN, INPUT_PULLUP);
-  pinMode(BUTTON_LEFT_PIN, INPUT_PULLUP);
-  pinMode(BUTTON_RIGHT_PIN, INPUT_PULLUP);
+  pinMode(BUTTON_ACTION_PIN, INPUT_PULLUP);
 
-  rawMask = readPressedMask();
-  stableMask = rawMask;
-
-  rawChangedAt = millis();
-  firstLeftClickAt = 0;
+  const uint32_t now = millis();
+  initializeButton(upState, BUTTON_UP_PIN, now);
+  initializeButton(downState, BUTTON_DOWN_PIN, now);
+  initializeButton(actionState, BUTTON_ACTION_PIN, now);
+  actionPressedAt = now;
+  actionLongEmitted = actionState.stablePressed;
 }
 
 
 ButtonEvent readButtonEvent()
 {
   const uint32_t now = millis();
+  const ButtonEdge upEdge = updateButton(upState, BUTTON_UP_PIN, now);
+  const ButtonEdge downEdge = updateButton(downState, BUTTON_DOWN_PIN, now);
+  const ButtonEdge actionEdge =
+      updateButton(actionState, BUTTON_ACTION_PIN, now);
 
-  const uint8_t newRawMask =
-      readPressedMask();
+  if (upEdge == EDGE_PRESSED) return BUTTON_UP_CLICK;
+  if (downEdge == EDGE_PRESSED) return BUTTON_DOWN_CLICK;
 
-
-  // Remove an unfinished LEFT click when its
-  // double-click time expires.
-  if (
-      firstLeftClickAt != 0 and
-      now - firstLeftClickAt > DOUBLE_CLICK_MS
-  )
+  if (actionEdge == EDGE_PRESSED)
   {
-    firstLeftClickAt = 0;
+    actionPressedAt = now;
+    actionLongEmitted = false;
   }
 
-
-  // Restart the debounce timer whenever the raw
-  // electrical reading changes.
-  if (newRawMask != rawMask)
+  // Emit HOLD once while the key is still down. Marking it here suppresses
+  // the normal click when that same physical press is later released.
+  if (actionState.stablePressed && !actionLongEmitted &&
+      (uint32_t)(now - actionPressedAt) >= ACTION_LONG_PRESS_MS)
   {
-    rawMask = newRawMask;
-
-    rawChangedAt = now;
+    actionLongEmitted = true;
+    return BUTTON_ACTION_LONG_PRESS;
   }
 
-
-  // The new reading has not remained stable long enough.
-  if (now - rawChangedAt < DEBOUNCE_MS)
+  if (actionEdge == EDGE_RELEASED && !actionLongEmitted)
   {
-    return BUTTON_NONE;
+    return BUTTON_ACTION_CLICK;
   }
-
-
-  // Nothing changed after debouncing.
-  if (stableMask == rawMask)
-  {
-    return BUTTON_NONE;
-  }
-
-
-  // Only newly pressed buttons create events.
-  // Releasing a button creates no event.
-  const uint8_t pressed =
-      rawMask & ~stableMask;
-
-  stableMask = rawMask;
-
-
-  // UP and DOWN use normal single clicks.
-  if (pressed & UP_MASK)
-  {
-    return BUTTON_UP_CLICK;
-  }
-
-  if (pressed & DOWN_MASK)
-  {
-    return BUTTON_DOWN_CLICK;
-  }
-
-
-  // LEFT uses double-click.
-  if (pressed & LEFT_MASK)
-  {
-    if (
-        firstLeftClickAt != 0 and
-        now - firstLeftClickAt <= DOUBLE_CLICK_MS
-    )
-    {
-      firstLeftClickAt = 0;
-
-      return BUTTON_LEFT_DOUBLE_CLICK;
-    }
-
-    // This was only the first click.
-    firstLeftClickAt = now;
-  }
-
-
-  // RIGHT emits exactly once on its debounced press edge. Holding it cannot
-  // repeat because stableMask does not change again until physical release.
-  if (pressed & RIGHT_MASK)
-  {
-    return BUTTON_RIGHT_CLICK;
-  }
-
 
   return BUTTON_NONE;
 }

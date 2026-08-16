@@ -68,16 +68,22 @@ static void printGain(uint8_t valueX100)
 }
 
 
-static void printPriority(uint8_t priority)
+static void printRouteInitial(RouteDirection route)
 {
-  switch (priority)
+  if (route == ROUTE_STRAIGHT) oled.print('S');
+  else if (route == ROUTE_LEFT) oled.print('L');
+  else oled.print('R');
+}
+
+
+static void printPriority()
+{
+  // Build the OLED label from the EEPROM-backed table itself. This prevents
+  // the six displayed orders from ever drifting away from navigation.
+  for (uint8_t rank = 0; rank < 3; rank++)
   {
-    case PRIORITY_STRAIGHT_LEFT_RIGHT: oled.print(F("S>L>R")); break;
-    case PRIORITY_STRAIGHT_RIGHT_LEFT: oled.print(F("S>R>L")); break;
-    case PRIORITY_LEFT_STRAIGHT_RIGHT: oled.print(F("L>S>R")); break;
-    case PRIORITY_LEFT_RIGHT_STRAIGHT: oled.print(F("L>R>S")); break;
-    case PRIORITY_RIGHT_STRAIGHT_LEFT: oled.print(F("R>S>L")); break;
-    default: oled.print(F("R>L>S")); break;
+    if (rank != 0) oled.print('>');
+    printRouteInitial(settingsPriorityAt(rank));
   }
 }
 
@@ -109,7 +115,7 @@ static void drawMainMenu()
   oled.print(F("SENSOR VALUES"));
 
   oled.setCursor(0, 7);
-  oled.print(F("R ENTER"));
+  oled.print(F("CLICK=OK HOLD=<"));
 }
 
 
@@ -143,7 +149,7 @@ static void drawTuningLabel(uint8_t item, uint8_t row)
     case TUNE_ROUTE_PRIORITY:
       oled.print(F("ROUTE"));
       oled.setCursor(10, row);
-      printPriority(routePriority);
+      printPriority();
       break;
     case TUNE_BOX_MODE:
       oled.print(F("BOX MODE"));
@@ -175,7 +181,7 @@ static void drawTuningMenu()
   }
 
   oled.setCursor(0, 7);
-  oled.print(F("R EDIT L2 BACK"));
+  oled.print(F("CLICK=OK HOLD=<"));
 }
 
 
@@ -253,7 +259,7 @@ static void drawEditScreen()
   oled.setCursor(0, 6);
   oled.print(F("UP/DOWN CHANGE"));
   oled.setCursor(0, 7);
-  oled.print(F("R OK L2 CANCEL"));
+  oled.print(F("CLICK=OK HOLD=<"));
 }
 
 
@@ -301,8 +307,7 @@ static void drawSensorFrame()
 {
   oled.clearDisplay();
   oled.setCursor(0, 0);
-  oled.print(digitalSensorView ? F("DIGITAL U TOGGLE") :
-                                 F("ANALOG  U TOGGLE"));
+  oled.print(F("U/D VIEW HOLD=<"));
 
   for (uint8_t row = 1; row <= 7; row++)
   {
@@ -347,7 +352,7 @@ UiAction uiHandleButton(ButtonEvent event)
       mainItem = (mainItem + 1) % MAIN_ITEM_COUNT;
       drawMainMenu();
     }
-    else if (event == BUTTON_RIGHT_CLICK)
+    else if (event == BUTTON_ACTION_CLICK)
     {
       if (mainItem == MAIN_START_RUN) return UI_START_RUN;
       if (mainItem == MAIN_TUNING)
@@ -376,11 +381,11 @@ UiAction uiHandleButton(ButtonEvent event)
       tuningItem = (tuningItem + 1) % TUNING_ITEM_COUNT;
       drawTuningMenu();
     }
-    else if (event == BUTTON_LEFT_DOUBLE_CLICK)
+    else if (event == BUTTON_ACTION_LONG_PRESS)
     {
       uiReturnToMain();
     }
-    else if (event == BUTTON_RIGHT_CLICK)
+    else if (event == BUTTON_ACTION_CLICK)
     {
       if (tuningItem == TUNE_CALIBRATE)
       {
@@ -407,13 +412,13 @@ UiAction uiHandleButton(ButtonEvent event)
       decreaseSelectedValue();
       drawEditScreen();
     }
-    else if (event == BUTTON_LEFT_DOUBLE_CLICK)
+    else if (event == BUTTON_ACTION_LONG_PRESS)
     {
       setSelectedValue(originalValue);
       currentScreen = SCREEN_TUNING;
       drawTuningMenu();
     }
-    else if (event == BUTTON_RIGHT_CLICK)
+    else if (event == BUTTON_ACTION_CLICK)
     {
       if (tuningItem == TUNE_THRESHOLD)
       {
@@ -431,7 +436,7 @@ UiAction uiHandleButton(ButtonEvent event)
       digitalSensorView = !digitalSensorView;
       drawSensorFrame();
     }
-    else if (event == BUTTON_LEFT_DOUBLE_CLICK)
+    else if (event == BUTTON_ACTION_LONG_PRESS)
     {
       uiReturnToMain();
     }
@@ -497,7 +502,7 @@ void uiShowPlacement()
 {
   showStatus(F("PLACE ROBOT"), F("START IN 2 SEC"));
   oled.setCursor(0, 7);
-  oled.print(F("L2 CANCEL"));
+  oled.print(F("HOLD TO CANCEL"));
 }
 
 
@@ -505,7 +510,7 @@ void uiShowRunning()
 {
   showStatus(F("RUNNING"), F("SENSOR MONITORED"));
   oled.setCursor(0, 7);
-  oled.print(F("L2 STOP"));
+  oled.print(F("HOLD TO STOP"));
 }
 
 
@@ -525,7 +530,7 @@ void uiShowCalibration()
 {
   showStatus(F("CALIBRATION"), F("PLACE: 2 SEC"));
   oled.setCursor(0, 7);
-  oled.print(F("L2 CANCEL"));
+  oled.print(F("HOLD TO CANCEL"));
 }
 
 
@@ -546,7 +551,7 @@ void uiShowMotorTest()
 {
   showStatus(F("MOTOR TEST"), F("LIFT WHEELS 2S"));
   oled.setCursor(0, 7);
-  oled.print(F("L2 CANCEL"));
+  oled.print(F("HOLD TO CANCEL"));
 }
 
 

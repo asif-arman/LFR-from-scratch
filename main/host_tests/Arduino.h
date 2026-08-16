@@ -9,6 +9,9 @@ using std::uint8_t;
 using std::uint16_t;
 using std::uint32_t;
 
+using __FlashStringHelper = char;
+#define F(text) text
+
 #define A0 14
 #define A1 15
 #define A2 16

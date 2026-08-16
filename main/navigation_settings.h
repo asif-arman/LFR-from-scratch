@@ -15,11 +15,10 @@ constexpr uint8_t ANALOG_NOISE_FLOOR = 20;
 // ================================================================
 
 constexpr uint16_t GAP_ALLOWANCE_MS = 200;
+constexpr uint8_t JUNCTION_PROBE_MS = 50;
 constexpr uint8_t SIDE_CONFIRM_TICKS = 2;            // ~7 ms
-constexpr uint8_t JUNCTION_CLEAR_TICKS = 2;          // ~7 ms
 constexpr uint8_t REACQUIRE_CONFIRM_TICKS = 3;       // ~10.5 ms
 constexpr uint8_t TURN_CENTER_LOST_TICKS = 2;        // ~7 ms
-constexpr uint8_t TURN_CAPTURE_MAX_ACTIVE = 10;
 constexpr uint8_t START_EXIT_CONFIRM_TICKS = 4;      // ~14 ms
 constexpr uint8_t FINISH_ARM_TICKS = 12;             // ~42 ms
 constexpr uint8_t FINISH_CONFIRM_TICKS = 8;          // ~28 ms
@@ -32,7 +31,6 @@ constexpr uint8_t FINISH_CONFIRM_TICKS = 8;          // ~28 ms
 constexpr uint8_t USABLE_LINE_MAX_ACTIVE = 7;
 constexpr uint8_t USABLE_LINE_MAX_SPAN = 7;
 constexpr uint8_t SIDE_CLUSTER_MIN_ACTIVE = 2;
-constexpr uint8_t JUNCTION_SIDE_MIN_SPAN = 7;
 constexpr uint8_t BOX_MIN_ACTIVE = 12;
 constexpr uint8_t BOX_MIN_SPAN = 12;
 

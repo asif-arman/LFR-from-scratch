@@ -10,6 +10,8 @@
 constexpr uint16_t ALL_SENSOR_MASK =
     ((uint16_t)1 << SENSOR_COUNT) - 1;
 constexpr uint16_t CENTER_REGION_MASK = 0x01E0; // S5..S8
+constexpr uint16_t RIGHT_OUTER_MASK = 0x0003;   // S0..S1
+constexpr uint16_t LEFT_OUTER_MASK = 0x3000;    // S12..S13
 
 
 enum NavState : uint8_t
@@ -47,6 +49,7 @@ static uint16_t worstSensorFrameMicros = 0;
 static uint16_t worstControlTickMicros = 0;
 static uint32_t gapStartedAtMillis = 0;
 static uint32_t turnBlankStartedAtMillis = 0;
+static uint32_t junctionProbeStartedAtMillis = 0;
 
 static int16_t previousError = 0;
 static bool previousErrorValid = false;
@@ -66,7 +69,6 @@ static uint8_t rightBranchFrames = 0;
 static uint8_t junctionFeatureFrames = 0;
 static uint8_t probeLeftFrames = 0;
 static uint8_t probeRightFrames = 0;
-static uint8_t probeClearFrames = 0;
 static bool sawLeft = false;
 static bool sawStraight = false;
 static bool sawRight = false;
@@ -160,12 +162,6 @@ static bool isUsableLine(uint16_t pattern)
 }
 
 
-static bool isCredibleCenterLine(uint16_t pattern)
-{
-  return isUsableLine(pattern) && centerSeesLine(pattern);
-}
-
-
 static bool isBoxPattern(uint16_t pattern)
 {
   return activeCount(pattern) >= BOX_MIN_ACTIVE &&
@@ -177,8 +173,7 @@ static bool leftSideEvidence(uint16_t pattern)
 {
   if (!hasAdjacentCluster(pattern, 10, 13)) return false;
   return patternGroups(pattern) >= 2 ||
-      (centerSeesLine(pattern) &&
-       patternSpan(pattern) >= JUNCTION_SIDE_MIN_SPAN);
+      (centerSeesLine(pattern) && (pattern & LEFT_OUTER_MASK) != 0);
 }
 
 
@@ -186,8 +181,7 @@ static bool rightSideEvidence(uint16_t pattern)
 {
   if (!hasAdjacentCluster(pattern, 0, 3)) return false;
   return patternGroups(pattern) >= 2 ||
-      (centerSeesLine(pattern) &&
-       patternSpan(pattern) >= JUNCTION_SIDE_MIN_SPAN);
+      (centerSeesLine(pattern) && (pattern & RIGHT_OUTER_MASK) != 0);
 }
 
 
@@ -196,20 +190,6 @@ static SensorFrameKind classifySensorFrame(uint16_t pattern)
   if (pattern == 0) return FRAME_NO_LINE;
   if (isUsableLine(pattern)) return FRAME_NORMAL_LINE;
   return FRAME_JUNCTION_FEATURE;
-}
-
-
-static bool isTurnCaptureLine(uint16_t pattern,
-                              SensorFrameKind frameKind)
-{
-  if (frameKind == FRAME_NORMAL_LINE) return true;
-
-  // A thick line can be classified as a wide feature even though it is the
-  // outgoing corner line. One strong contiguous group touching the centre is
-  // safe to capture; separated groups remain junction evidence.
-  return patternGroups(pattern) == 1 &&
-      activeCount(pattern) <= TURN_CAPTURE_MAX_ACTIVE &&
-      centerSeesLine(pattern);
 }
 
 
@@ -443,12 +423,16 @@ static void beginJunctionProbe(uint16_t pattern)
   junctionLocked = true;
   sawLeft = leftBranchFrames >= SIDE_CONFIRM_TICKS;
   sawRight = rightBranchFrames >= SIDE_CONFIRM_TICKS;
+  // The centre seen on entry is the incoming stem, not proof of a straight
+  // exit. Straight is confirmed only after probing forward.
   sawStraight = false;
-  probeLeftFrames = sawLeft ? SIDE_CONFIRM_TICKS : 0;
-  probeRightFrames = sawRight ? SIDE_CONFIRM_TICKS : 0;
-  probeClearFrames = 0;
-  if (leftSideEvidence(pattern)) sawLeft = true;
-  if (rightSideEvidence(pattern)) sawRight = true;
+  probeLeftFrames = leftBranchFrames;
+  probeRightFrames = rightBranchFrames;
+  if (!sawLeft && probeLeftFrames == 0 && leftSideEvidence(pattern))
+    probeLeftFrames = 1;
+  if (!sawRight && probeRightFrames == 0 && rightSideEvidence(pattern))
+    probeRightFrames = 1;
+  junctionProbeStartedAtMillis = millis();
   resetPd();
   moveLFR(JUNCTION_CRAWL_PWM, JUNCTION_CRAWL_PWM);
 }
@@ -658,20 +642,31 @@ static NavigationResult tickJunctionProbe(uint16_t pattern,
                                            int16_t linePosition)
 {
   updateProbeSideEvidence(pattern);
+  if (frameKind == FRAME_NORMAL_LINE && centerSeesLine(pattern))
+    sawStraight = true;
 
-  if (frameKind == FRAME_JUNCTION_FEATURE)
+  // If the driver's first displayed priority has been physically confirmed,
+  // there is no benefit in crawling farther across the intersection.
+  const RouteDirection firstPriority = settingsPriorityAt(0);
+  if (routeIsAvailable(firstPriority) &&
+      commitRoute(firstPriority, linePosition))
   {
-    probeClearFrames = 0;
+    return NAVIGATION_ACTIVE;
   }
-  else
+
+  if ((uint32_t)(millis() - junctionProbeStartedAtMillis) >=
+      JUNCTION_PROBE_MS)
   {
-    if (probeClearFrames < JUNCTION_CLEAR_TICKS) probeClearFrames++;
-    if (probeClearFrames >= JUNCTION_CLEAR_TICKS)
-    {
-      sawStraight = isCredibleCenterLine(pattern);
-      if (finishJunctionProbe(linePosition)) return NAVIGATION_ACTIVE;
-      probeClearFrames = JUNCTION_CLEAR_TICKS;
-    }
+    // A broad centred strip may remain feature-classified for the whole
+    // probe. It is a valid straight route, but never side-branch evidence.
+    if (centerSeesLine(pattern)) sawStraight = true;
+    if (finishJunctionProbe(linePosition)) return NAVIGATION_ACTIVE;
+
+    // No route was confirmed during the bounded probe. Leave probe mode and
+    // crawl forward until a real line appears; do not search or U-turn here.
+    setReacquireState(REACQUIRE_FORWARD);
+    moveLFR(JUNCTION_CRAWL_PWM, JUNCTION_CRAWL_PWM);
+    return NAVIGATION_ACTIVE;
   }
   moveLFR(JUNCTION_CRAWL_PWM, JUNCTION_CRAWL_PWM);
   return NAVIGATION_ACTIVE;
@@ -701,11 +696,10 @@ static NavigationResult tickTurn(uint16_t pattern,
     else oldCenterAbsentCount = 0;
   }
 
-  if (oldCenterWasLeft && linePosition >= 0 &&
-      isTurnCaptureLine(pattern, frameKind))
+  if (oldCenterWasLeft && pattern != 0 && linePosition >= 0)
   {
-    // A centred thick corner can look like a junction for one frame. Capture
-    // it now, brake rotational momentum, then let capped PD settle the robot.
+    // Once the old centre is gone, every calibrated nonzero line is useful.
+    // Capture before feature handling so outer/thick lines cannot be skipped.
     beginBrakeReacquire(REACQUIRE_TURN);
     return NAVIGATION_ACTIVE;
   }
@@ -749,8 +743,7 @@ static NavigationResult tickUTurn(uint16_t pattern,
     else oldCenterAbsentCount = 0;
   }
 
-  if (oldCenterWasLeft && linePosition >= 0 &&
-      isTurnCaptureLine(pattern, frameKind))
+  if (oldCenterWasLeft && pattern != 0 && linePosition >= 0)
   {
     // A newly encountered line always wins over loss recovery. Brake this
     // tick so the U-turn cannot carry the robot across it at speed.
@@ -839,6 +832,7 @@ void navigationStart()
   terminalResult = NAVIGATION_ACTIVE;
   gapStartedAtMillis = 0;
   turnBlankStartedAtMillis = 0;
+  junctionProbeStartedAtMillis = 0;
   lastForwardLeft = 0;
   lastForwardRight = 0;
   lastForwardValid = false;
@@ -896,11 +890,9 @@ NavigationResult navigationTick(uint16_t sensorValues[])
 
   const uint16_t pattern = makeSensorPattern(sensorValues);
   const SensorFrameKind frameKind = classifySensorFrame(pattern);
-  // Classify every fresh frame before motion. During a pivot, calculate a
-  // position for a strong centred thick line too, so it cannot be ignored.
-  const bool turnCaptureLine = isTurnCaptureLine(pattern, frameKind);
-  const int16_t linePosition =
-      (frameKind == FRAME_NORMAL_LINE || turnCaptureLine) ?
+  // Every nonzero calibrated frame receives a position. TURN and UTURN can
+  // therefore capture outer, thick, or junction-classified lines immediately.
+  const int16_t linePosition = pattern != 0 ?
       calculateAnalogLinePosition(sensorValues) : -1;
   if (frameKind == FRAME_NORMAL_LINE && linePosition >= 0)
     rememberOrdinaryLine(linePosition);

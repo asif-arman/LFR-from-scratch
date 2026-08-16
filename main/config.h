@@ -32,13 +32,12 @@ constexpr uint8_t MUX_SIG = A7;
 
 
 // ==================================================
-// FOUR MENU BUTTONS
+// THREE MENU BUTTONS
 // ==================================================
 
 constexpr uint8_t BUTTON_UP_PIN = 2;
 constexpr uint8_t BUTTON_DOWN_PIN = 3;
-constexpr uint8_t BUTTON_LEFT_PIN = 4;
-constexpr uint8_t BUTTON_RIGHT_PIN = 12;
+constexpr uint8_t BUTTON_ACTION_PIN = 4;
 
 
 // ==================================================

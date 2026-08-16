@@ -106,7 +106,7 @@ void loop()
 
   if (appMode == APP_RUN_PLACEMENT)
   {
-    if (buttonEvent == BUTTON_LEFT_DOUBLE_CLICK)
+    if (buttonEvent == BUTTON_ACTION_LONG_PRESS)
     {
       returnToMenu();
       return;
@@ -124,7 +124,7 @@ void loop()
 
   if (appMode == APP_RUNNING)
   {
-    if (buttonEvent == BUTTON_LEFT_DOUBLE_CLICK)
+    if (buttonEvent == BUTTON_ACTION_LONG_PRESS)
     {
       returnToMenu();
       return;
@@ -144,7 +144,7 @@ void loop()
 
   if (appMode == APP_CALIBRATING)
   {
-    if (buttonEvent == BUTTON_LEFT_DOUBLE_CLICK)
+    if (buttonEvent == BUTTON_ACTION_LONG_PRESS)
     {
       returnToMenu();
       return;
@@ -164,7 +164,7 @@ void loop()
 
   if (appMode == APP_MOTOR_TEST)
   {
-    if (buttonEvent == BUTTON_LEFT_DOUBLE_CLICK)
+    if (buttonEvent == BUTTON_ACTION_LONG_PRESS)
     {
       returnToMenu();
       return;
@@ -183,8 +183,8 @@ void loop()
   {
     stopMotors();
     if (now - modeStartedAt >= RESULT_DISPLAY_MS ||
-        buttonEvent == BUTTON_LEFT_DOUBLE_CLICK ||
-        buttonEvent == BUTTON_RIGHT_CLICK)
+        buttonEvent == BUTTON_ACTION_LONG_PRESS ||
+        buttonEvent == BUTTON_ACTION_CLICK)
     {
       returnToMenu();
     }

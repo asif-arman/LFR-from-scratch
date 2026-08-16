@@ -202,12 +202,21 @@ static void finishReacquire(uint16_t centered)
 }
 
 
-static void selectFullCross(uint8_t priority, uint16_t exitPattern)
+static void enterFullCross(uint8_t priority)
 {
   routePriority = priority;
   repeat(ALL_SENSOR_MASK, SIDE_CONFIRM_TICKS);
   assert(state == STATE_JUNCTION_PROBE);
-  repeat(exitPattern, JUNCTION_CLEAR_TICKS);
+  assert(commandedLeft == JUNCTION_CRAWL_PWM &&
+         commandedRight == JUNCTION_CRAWL_PWM);
+}
+
+
+static void waitForProbeDecision(uint16_t pattern)
+{
+  uint8_t guard = JUNCTION_PROBE_MS * 1000UL / CONTROL_PERIOD_US + 5;
+  while (state == STATE_JUNCTION_PROBE && guard-- != 0) tick(pattern);
+  assert(state != STATE_JUNCTION_PROBE);
 }
 
 
@@ -222,6 +231,7 @@ int main()
       oneSensor(10) | oneSensor(11);
   const uint16_t thinRightBranch = centered |
       oneSensor(2) | oneSensor(3);
+  const uint16_t wideStraight = 0x0FFC; // S2..S11, no outer branch tips
 
   // Centered PD uses the requested 200 PWM normal speed.
   resetScenario();
@@ -349,40 +359,77 @@ int main()
   repeat(thickCentered, REACQUIRE_CONFIRM_TICKS);
   assert(state == STATE_FOLLOW);
 
-  // A T-junction clears to white and still chooses an available side.
+  // Even a junction-classified full-width frame is a captured line while a
+  // turn is active; feature handling must never keep the pivot running.
   resetScenario();
-  repeat(ALL_SENSOR_MASK, SIDE_CONFIRM_TICKS);
-  assert(state == STATE_JUNCTION_PROBE);
+  tick(rightEdge);
   tick(0);
-  assert(state == STATE_JUNCTION_PROBE);
+  assert(state == STATE_TURN);
+  tick(ALL_SENSOR_MASK);
+  assert(state == STATE_REACQUIRE && reacquireMotion == REACQUIRE_TURN);
+  assert(commandedLeft == 0 && commandedRight == 0);
+  tick(0); // a brief miss continues the same directed turn, not a U-turn
+  assert(state == STATE_REACQUIRE && reacquireMotion == REACQUIRE_TURN);
+  assert(commandedLeft == TURN_PWM && commandedRight == -TURN_PWM);
+  repeat(ALL_SENSOR_MASK, REACQUIRE_CONFIRM_TICKS);
+  assert(state == STATE_FOLLOW);
+
+  // A T-junction with LEFT first commits its confirmed side immediately.
+  resetScenario();
+  enterFullCross(PRIORITY_LEFT_STRAIGHT_RIGHT);
   tick(0);
   assert(state == STATE_TURN && turnDirection == -1);
 
-  // A cross with a center exit follows configured straight-first priority.
+  // A cross with a normal centre exit follows straight-first priority.
   resetScenario();
-  selectFullCross(PRIORITY_STRAIGHT_LEFT_RIGHT, centered);
+  enterFullCross(PRIORITY_STRAIGHT_LEFT_RIGHT);
+  tick(centered);
   assert(state == STATE_REACQUIRE);
   finishReacquire(centered);
 
-  // Incomplete junction classification keeps crawling instead of turning back.
+  // R>L>S uses the right-side S0..S3 evidence and commits promptly. A RIGHT
+  // turn is left motor forward and right motor reverse after guard dead-time.
+  resetScenario();
+  enterFullCross(PRIORITY_RIGHT_LEFT_STRAIGHT);
+  tick(ALL_SENSOR_MASK);
+  assert(state == STATE_TURN && turnDirection == 1);
+  tick(0);
+  assert(commandedLeft == TURN_PWM && commandedRight == -TURN_PWM);
+
+  // Confirmed side branches stay latched even after the sensors leave them.
+  resetScenario();
+  routePriority = PRIORITY_LEFT_RIGHT_STRAIGHT;
+  repeat(thinRightBranch, SIDE_CONFIRM_TICKS);
+  assert(state == STATE_JUNCTION_PROBE && sawRight && !sawLeft);
+  waitForProbeDecision(0);
+  assert(state == STATE_TURN && turnDirection == 1);
+
+  // A broad centred strip has no outer branch tips. It can be selected as
+  // straight at the deadline but must never invent LEFT or RIGHT branches.
+  resetScenario();
+  routePriority = PRIORITY_RIGHT_LEFT_STRAIGHT;
+  repeat(wideStraight, SIDE_CONFIRM_TICKS);
+  assert(state == STATE_JUNCTION_PROBE && !sawLeft && !sawRight);
+  waitForProbeDecision(wideStraight);
+  assert(state == STATE_REACQUIRE && !sawLeft && !sawRight);
+
+  // An unclassified feature is bounded to 50 ms, then safely reacquires
+  // forward instead of probing forever, searching, or U-turning.
   resetScenario();
   const uint16_t ambiguousFeature = oneSensor(4) | oneSensor(9);
   repeat(ambiguousFeature, SIDE_CONFIRM_TICKS);
   assert(state == STATE_JUNCTION_PROBE);
-  repeat(0, LONG_ROTATION_TEST_TICKS);
-  assert(state == STATE_JUNCTION_PROBE);
+  waitForProbeDecision(0);
+  assert(state == STATE_REACQUIRE);
   assert(commandedLeft == JUNCTION_CRAWL_PWM &&
          commandedRight == JUNCTION_CRAWL_PWM);
   assert(stopCallCount == 0);
-  repeat(thinRightBranch, SIDE_CONFIRM_TICKS);
-  repeat(0, JUNCTION_CLEAR_TICKS);
-  assert(state == STATE_TURN && turnDirection == 1);
 
   // The first off-centre outgoing line after old-centre loss brakes the pivot.
   resetScenario();
   routePriority = PRIORITY_LEFT_STRAIGHT_RIGHT;
   repeat(thinLeftBranch, SIDE_CONFIRM_TICKS);
-  repeat(centered, JUNCTION_CLEAR_TICKS);
+  tick(thinLeftBranch);
   assert(state == STATE_TURN);
   repeat(0, TURN_CENTER_LOST_TICKS);
   assert(state == STATE_TURN && stopCallCount == 0);
@@ -428,14 +475,16 @@ int main()
   tick(centered);
   assert(commandedLeft == 200 && commandedRight == 200);
 
-  // A newly found wide feature also cancels U-turn and starts junction work.
+  // A junction-classified line also overrides U-turn before feature handling.
   resetScenario();
   tick(centered);
   tick(0);
   runBlankUntilUTurn();
   assert(state == STATE_U_TURN);
   tick(ALL_SENSOR_MASK);
-  assert(state == STATE_JUNCTION_PROBE && junctionLocked);
+  assert(state == STATE_REACQUIRE &&
+         reacquireMotion == REACQUIRE_U_TURN);
+  assert(commandedLeft == 0 && commandedRight == 0);
 
   // A junction cancels pending loss immediately and never starts a U-turn.
   resetScenario();
@@ -447,6 +496,35 @@ int main()
   {
     tick(0);
     assert(state != STATE_U_TURN);
+  }
+
+  // The six EEPROM numeric values, navigation table, and OLED text source are
+  // one exact ordering. OLED now renders directly from settingsPriorityAt().
+  static_assert(PRIORITY_STRAIGHT_LEFT_RIGHT == 0, "priority EEPROM changed");
+  static_assert(PRIORITY_STRAIGHT_RIGHT_LEFT == 1, "priority EEPROM changed");
+  static_assert(PRIORITY_LEFT_STRAIGHT_RIGHT == 2, "priority EEPROM changed");
+  static_assert(PRIORITY_LEFT_RIGHT_STRAIGHT == 3, "priority EEPROM changed");
+  static_assert(PRIORITY_RIGHT_STRAIGHT_LEFT == 4, "priority EEPROM changed");
+  static_assert(PRIORITY_RIGHT_LEFT_STRAIGHT == 5, "priority EEPROM changed");
+  const RouteDirection expectedPriorities[ROUTE_PRIORITY_COUNT][3] =
+  {
+    { ROUTE_STRAIGHT, ROUTE_LEFT, ROUTE_RIGHT },
+    { ROUTE_STRAIGHT, ROUTE_RIGHT, ROUTE_LEFT },
+    { ROUTE_LEFT, ROUTE_STRAIGHT, ROUTE_RIGHT },
+    { ROUTE_LEFT, ROUTE_RIGHT, ROUTE_STRAIGHT },
+    { ROUTE_RIGHT, ROUTE_STRAIGHT, ROUTE_LEFT },
+    { ROUTE_RIGHT, ROUTE_LEFT, ROUTE_STRAIGHT }
+  };
+  EEPROM.reset();
+  for (uint8_t priority = 0; priority < ROUTE_PRIORITY_COUNT; priority++)
+  {
+    routePriority = priority;
+    for (uint8_t rank = 0; rank < 3; rank++)
+      assert(settingsPriorityAt(rank) == expectedPriorities[priority][rank]);
+    settingsSaveIfChanged();
+    routePriority = 0xFF;
+    settingsLoad();
+    assert(routePriority == priority);
   }
 
   // Generation 3 speed 100 migrates once to 200 without losing calibration.
