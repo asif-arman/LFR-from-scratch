@@ -396,6 +396,78 @@ int main()
   tick(0);
   assert(commandedLeft == TURN_PWM && commandedRight == -TURN_PWM);
 
+  // L>R>S commits LEFT once. The original junction, straight exit, and RIGHT
+  // branch cannot reopen probing or steal the locked physical direction.
+  resetScenario();
+  enterFullCross(PRIORITY_LEFT_RIGHT_STRAIGHT);
+  tick(ALL_SENSOR_MASK);
+  assert(state == STATE_TURN && junctionLocked && turnDirection == -1);
+  tick(ALL_SENSOR_MASK);
+  assert(state == STATE_TURN && junctionLocked && turnDirection == -1);
+  assert(commandedLeft == -TURN_PWM && commandedRight == TURN_PWM);
+  repeat(0, TURN_CENTER_LOST_TICKS);
+  tick(centered);
+  assert(state == STATE_TURN && junctionLocked && turnDirection == -1);
+  tick(oneSensor(2));
+  assert(state == STATE_TURN && junctionLocked && turnDirection == -1);
+
+  // The selected S8..S13 line starts capped reacquisition immediately.
+  tick(oneSensor(12));
+  assert(state == STATE_REACQUIRE && junctionLocked &&
+         reacquireMotion == REACQUIRE_TURN);
+  assert(commandedLeft == 0 && commandedRight == 0);
+  tick(oneSensor(12));
+  assert(state == STATE_REACQUIRE && junctionLocked &&
+         reacquireStableCount == 0);
+  tick(centered);
+  assert(state == STATE_REACQUIRE && junctionLocked &&
+         reacquireStableCount == 1);
+  tick(0);
+  assert(state == STATE_REACQUIRE && junctionLocked &&
+         reacquireStableCount == 0 && turnDirection == -1);
+  tick(0);
+  assert(commandedLeft == -TURN_PWM && commandedRight == TURN_PWM);
+  tick(oneSensor(12));
+  assert(state == STATE_REACQUIRE && junctionLocked);
+  tick(centered);
+  assert(state == STATE_REACQUIRE && junctionLocked &&
+         reacquireStableCount == 1);
+  tick(centered);
+  assert(state == STATE_REACQUIRE && junctionLocked &&
+         reacquireStableCount == 2);
+  tick(centered);
+  assert(state == STATE_FOLLOW && !junctionLocked);
+
+  // R>L>S is the exact mirror: S8..S13/straight cannot finish RIGHT, while
+  // S0..S5 captures and three centred frames release the lock.
+  resetScenario();
+  enterFullCross(PRIORITY_RIGHT_LEFT_STRAIGHT);
+  tick(ALL_SENSOR_MASK);
+  assert(state == STATE_TURN && junctionLocked && turnDirection == 1);
+  tick(ALL_SENSOR_MASK);
+  assert(state == STATE_TURN && junctionLocked && turnDirection == 1);
+  assert(commandedLeft == TURN_PWM && commandedRight == -TURN_PWM);
+  repeat(0, TURN_CENTER_LOST_TICKS);
+  tick(centered);
+  assert(state == STATE_TURN && junctionLocked && turnDirection == 1);
+  tick(oneSensor(11));
+  assert(state == STATE_TURN && junctionLocked && turnDirection == 1);
+  tick(oneSensor(1));
+  assert(state == STATE_REACQUIRE && junctionLocked &&
+         reacquireMotion == REACQUIRE_TURN);
+  assert(commandedLeft == 0 && commandedRight == 0);
+  tick(oneSensor(1));
+  assert(state == STATE_REACQUIRE && junctionLocked &&
+         reacquireStableCount == 0);
+  tick(centered);
+  assert(state == STATE_REACQUIRE && junctionLocked &&
+         reacquireStableCount == 1);
+  tick(centered);
+  assert(state == STATE_REACQUIRE && junctionLocked &&
+         reacquireStableCount == 2);
+  tick(centered);
+  assert(state == STATE_FOLLOW && !junctionLocked);
+
   // Confirmed side branches stay latched even after the sensors leave them.
   resetScenario();
   routePriority = PRIORITY_LEFT_RIGHT_STRAIGHT;

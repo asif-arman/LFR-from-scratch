@@ -103,6 +103,7 @@ void loop()
 {
   const ButtonEvent buttonEvent = readButtonEvent();
   const uint32_t now = millis();
+  
 
   if (appMode == APP_RUN_PLACEMENT)
   {

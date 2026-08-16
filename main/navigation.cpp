@@ -12,6 +12,8 @@ constexpr uint16_t ALL_SENSOR_MASK =
 constexpr uint16_t CENTER_REGION_MASK = 0x01E0; // S5..S8
 constexpr uint16_t RIGHT_OUTER_MASK = 0x0003;   // S0..S1
 constexpr uint16_t LEFT_OUTER_MASK = 0x3000;    // S12..S13
+constexpr uint16_t RIGHT_TURN_TARGET_MASK = 0x003F; // S0..S5
+constexpr uint16_t LEFT_TURN_TARGET_MASK = 0x3F00;  // S8..S13
 
 
 enum NavState : uint8_t
@@ -149,6 +151,19 @@ static bool hasAdjacentCluster(uint16_t pattern,
 static bool centerSeesLine(uint16_t pattern)
 {
   return (pattern & CENTER_REGION_MASK) != 0;
+}
+
+
+static uint16_t selectedTurnTargetMask()
+{
+  return turnDirection < 0 ? LEFT_TURN_TARGET_MASK :
+                             RIGHT_TURN_TARGET_MASK;
+}
+
+
+static bool selectedTurnTargetSeesLine(uint16_t pattern)
+{
+  return (pattern & selectedTurnTargetMask()) != 0;
 }
 
 
@@ -696,15 +711,18 @@ static NavigationResult tickTurn(uint16_t pattern,
     else oldCenterAbsentCount = 0;
   }
 
-  if (oldCenterWasLeft && pattern != 0 && linePosition >= 0)
+  const bool captureLine = junctionLocked ?
+      selectedTurnTargetSeesLine(pattern) : pattern != 0;
+  if (oldCenterWasLeft && captureLine && linePosition >= 0)
   {
-    // Once the old centre is gone, every calibrated nonzero line is useful.
-    // Capture before feature handling so outer/thick lines cannot be skipped.
+    // A free sharp turn may take any line. A committed junction turn may only
+    // take its selected physical side, so straight/opposite branches cannot
+    // steal the decision after LEFT or RIGHT has already been chosen.
     beginBrakeReacquire(REACQUIRE_TURN);
     return NAVIGATION_ACTIVE;
   }
 
-  if (frameKind == FRAME_JUNCTION_FEATURE)
+  if (!junctionLocked && frameKind == FRAME_JUNCTION_FEATURE)
   {
     // A junction is line evidence, never permission to keep rotating or to
     // escalate loss recovery. Let the normal junction chooser handle it.
@@ -713,7 +731,7 @@ static NavigationResult tickTurn(uint16_t pattern,
     return NAVIGATION_ACTIVE;
   }
 
-  if (pattern == 0 && turnBlankStartedAtMillis != 0 &&
+  if (!junctionLocked && pattern == 0 && turnBlankStartedAtMillis != 0 &&
       (uint32_t)(millis() - turnBlankStartedAtMillis) >= GAP_ALLOWANCE_MS)
   {
     // An isolated edge dot may suggest a corner briefly, but continuous blank
@@ -788,6 +806,38 @@ static NavigationResult tickReacquire(uint16_t pattern,
       reacquireStableCount = 0;
       moveLFR(START_BOX_EXIT_PWM, START_BOX_EXIT_PWM);
     }
+    return NAVIGATION_ACTIVE;
+  }
+
+  if (junctionLocked && reacquireMotion == REACQUIRE_TURN)
+  {
+    const bool selectedLineVisible = linePosition >= 0 &&
+        (selectedTurnTargetSeesLine(pattern) || centerSeesLine(pattern));
+    if (selectedLineVisible)
+    {
+      // Follow the chosen branch at the existing cap immediately, but finish
+      // only after it reaches S5..S8 for three consecutive fresh frames.
+      applyPd(linePosition, REACQUIRE_PWM);
+      if (centerSeesLine(pattern))
+      {
+        if (reacquireStableCount < REACQUIRE_CONFIRM_TICKS)
+          reacquireStableCount++;
+      }
+      else reacquireStableCount = 0;
+
+      if (reacquireStableCount >= REACQUIRE_CONFIRM_TICKS)
+      {
+        clearJunctionLock();
+        state = STATE_FOLLOW;
+        resetPd();
+      }
+      return NAVIGATION_ACTIVE;
+    }
+
+    // Losing the selected branch does not reopen route choice or start a new
+    // recovery. Reset confirmation and continue the same signed junction turn.
+    reacquireStableCount = 0;
+    commandTurn();
     return NAVIGATION_ACTIVE;
   }
 
