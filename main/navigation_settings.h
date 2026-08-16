@@ -6,86 +6,52 @@
 // One fresh 14-sensor frame is acquired per 3.5 ms navigation tick.
 constexpr uint16_t CONTROL_PERIOD_US = 3500;
 
-// Limits a one-frame derivative kick without adding a history filter.
-constexpr int16_t DERIVATIVE_ERROR_DELTA_LIMIT = 300;
+// Calibrated analog strength below 2% is ignored as sensor-floor noise.
+constexpr uint8_t ANALOG_NOISE_FLOOR = 20;
 
 
 // ================================================================
 // FRAME-COUNTED CONFIRMATION AND TIMEOUTS
 // ================================================================
 
-constexpr uint8_t LOSS_PROBE_TICKS = 14;           // ~49 ms
-constexpr uint8_t LINE_CONFIRM_TICKS = 3;          // ~10.5 ms
-constexpr uint8_t PROBE_BRAKE_TICKS = 3;           // ~10.5 ms
-constexpr uint8_t JUNCTION_CONFIRM_TICKS = 3;      // ~10.5 ms
-constexpr uint8_t ROUTE_MIN_VOTES = 2;             // ~7 ms evidence
-constexpr uint8_t START_EXIT_CONFIRM_TICKS = 4;    // ~14 ms
-constexpr uint8_t FINISH_ARM_TICKS = 12;           // ~42 ms narrow travel
-constexpr uint8_t FINISH_CONFIRM_TICKS = 8;        // ~28 ms
-constexpr uint8_t TURN_CENTER_CONFIRM_TICKS = 2;   // ~7 ms
-constexpr uint8_t JUNCTION_EXIT_CONFIRM_TICKS = 4; // ~14 ms
-constexpr uint8_t TURN_CENTER_LOST_TICKS = 2;       // ~7 ms
-constexpr uint8_t TURN_SIDE_CAPTURE_TICKS = 2;      // ~7 ms
-constexpr uint8_t TURN_REACQUIRE_TICKS = 3;         // ~10.5 ms
-constexpr uint8_t TURN_BRAKE_TICKS = 2;             // ~7 ms
-constexpr uint8_t TURN_FORWARD_CONFIRM_TICKS = 3;   // ~10.5 ms
-constexpr uint16_t TURN_TIMEOUT_TICKS = 400;        // ~1.4 s
-constexpr uint8_t UTURN_MIN_TICKS = 72;             // ~252 ms
-constexpr uint16_t UTURN_TIMEOUT_TICKS = 515;       // ~1.8 s
-constexpr uint8_t INVERSE_CONFIRM_TICKS = 2;        // ~7 ms
-// After a polarity toggle, require a few stable frames in the new polarity
-// before another boundary can be considered. This rejects boundary chatter
-// without imposing a blind distance/time lockout on short inverse sections.
-constexpr uint8_t INVERSE_REARM_STABLE_TICKS = 3;   // ~10.5 ms
+constexpr uint8_t LINE_CONFIRM_TICKS = 2;            // ~7 ms
+constexpr uint8_t GAP_ALLOWANCE_TICKS = 20;          // ~70 ms
+constexpr uint8_t SIDE_CONFIRM_TICKS = 2;            // ~7 ms
+constexpr uint8_t JUNCTION_CLEAR_TICKS = 2;          // ~7 ms
+constexpr uint8_t REACQUIRE_CONFIRM_TICKS = 3;       // ~10.5 ms
+constexpr uint8_t TURN_CENTER_LOST_TICKS = 2;        // ~7 ms
+constexpr uint8_t TURN_CENTER_CONFIRM_TICKS = 2;     // ~7 ms
+constexpr uint8_t TURN_MIN_TICKS = 8;                // ~28 ms
+constexpr uint16_t TURN_TIMEOUT_TICKS = 400;         // ~1.4 s
+constexpr uint8_t UTURN_MIN_TICKS = 72;              // ~252 ms
+constexpr uint16_t UTURN_TIMEOUT_TICKS = 515;        // ~1.8 s
+constexpr uint8_t REACQUIRE_TIMEOUT_TICKS = 80;      // ~280 ms
+constexpr uint8_t JUNCTION_PROBE_TIMEOUT_TICKS = 85; // ~298 ms
+constexpr uint8_t START_EXIT_CONFIRM_TICKS = 4;      // ~14 ms
+constexpr uint8_t FINISH_ARM_TICKS = 12;             // ~42 ms
+constexpr uint8_t FINISH_CONFIRM_TICKS = 8;          // ~28 ms
 
 
 // ================================================================
-// SENSOR-PATTERN FILTERS
+// SENSOR-PATTERN CLASSIFICATION
 // ================================================================
 
-constexpr uint8_t NARROW_LINE_MAX_ACTIVE = 5;
-constexpr uint8_t NARROW_LINE_MAX_SPAN = 6;
+constexpr uint8_t USABLE_LINE_MAX_ACTIVE = 7;
+constexpr uint8_t USABLE_LINE_MAX_SPAN = 7;
 constexpr uint8_t WIDE_FEATURE_MIN_ACTIVE = 8;
 constexpr uint8_t SIDE_CLUSTER_MIN_ACTIVE = 2;
+constexpr uint8_t JUNCTION_SIDE_MIN_SPAN = 7;
 constexpr uint8_t BOX_MIN_ACTIVE = 12;
 constexpr uint8_t BOX_MIN_SPAN = 12;
-
-// Narrow exits outside this central error are branches, not straight exits.
-constexpr uint16_t STRAIGHT_CENTER_ERROR_LIMIT = 180;
-
-constexpr uint16_t TURN_TREND_MIN_STEP = 40;
-constexpr uint8_t TURN_OUTWARD_CONFIRM = 2;
-constexpr uint16_t TURN_LOSS_ERROR_LIMIT = 350;
 
 
 // ================================================================
 // MOTOR COMMANDS
 // ================================================================
 
-constexpr uint8_t FORWARD_PROBE_MAX_PWM = 200;
-constexpr uint8_t GAP_PROBE_MIN_PWM = 100;
-constexpr uint8_t GAP_STEERING_MAX_DELTA = 60;
-constexpr uint8_t WIDE_AREA_CRAWL_PWM = 100;
-constexpr uint8_t START_BOX_EXIT_PWM = 105;
-constexpr uint8_t REACQUIRE_FORWARD_PWM = 115;
-
-// Signed pivot command used for explicit left/right route turns.
-constexpr uint8_t TURN_PWM = 120;
-
-// Slightly stronger signed pivot used for 180-degree loss recovery.
-constexpr uint8_t UTURN_PWM = 130;
-
-constexpr uint8_t TURN_REACQUIRE_PWM = 100;
-
-constexpr uint8_t LEFT_MOTOR_EFFECTIVE_MIN_PWM = 90;
-constexpr uint8_t RIGHT_MOTOR_EFFECTIVE_MIN_PWM = 90;
-
-
-// ================================================================
-// ADAPTIVE FOLLOW SPEED
-// ================================================================
-
-// Ordinary PD begins slowing above this absolute position error.
-constexpr uint16_t ADAPTIVE_SPEED_START_ERROR = 100;
-constexpr uint8_t ADAPTIVE_SPEED_REDUCTION_DIVISOR = 5;
-constexpr uint8_t ADAPTIVE_SPEED_MAX_REDUCTION = 70;
+constexpr uint8_t GAP_MAX_PWM = 75;
+constexpr uint8_t JUNCTION_CRAWL_PWM = 80;
+constexpr uint8_t REACQUIRE_PWM = 90;
+constexpr uint8_t START_BOX_EXIT_PWM = 95;
+constexpr uint8_t TURN_PWM = 100;
+constexpr uint8_t UTURN_PWM = 110;

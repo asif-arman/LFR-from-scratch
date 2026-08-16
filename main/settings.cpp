@@ -4,9 +4,9 @@
 #include <avr/pgmspace.h>
 
 
-uint8_t kpX100 = 30;
-uint8_t kdX100 = 15;
-uint8_t baseSpeed = 130;
+uint8_t kpX100 = 20;
+uint8_t kdX100 = 50;
+uint8_t baseSpeed = 100;
 uint16_t sensorThreshold = 400;
 uint8_t routePriority = PRIORITY_STRAIGHT_LEFT_RIGHT;
 bool boxMode = false;
@@ -21,7 +21,7 @@ constexpr uint8_t CALIBRATION_VALID_MASK = 1 << 0;
 constexpr uint8_t BOX_MODE_MASK = 1 << 4;
 constexpr uint8_t TUNING_VERSION_SHIFT = 1;
 constexpr uint8_t TUNING_VERSION_MASK = 0x0E;
-constexpr uint8_t CURRENT_TUNING_VERSION = 2;
+constexpr uint8_t CURRENT_TUNING_VERSION = 3;
 
 
 // EEPROM byte layout (packed, 67 bytes total):
@@ -108,9 +108,9 @@ static void writeRecord(SettingsRecord &record)
 
 static void restoreDefaults()
 {
-  kpX100 = 30;
-  kdX100 = 15;
-  baseSpeed = 130;
+  kpX100 = 20;
+  kdX100 = 50;
+  baseSpeed = 100;
   sensorThreshold = 400;
   routePriority = PRIORITY_STRAIGHT_LEFT_RIGHT;
   boxMode = false;
@@ -200,11 +200,11 @@ void settingsLoad()
       (record.flags & TUNING_VERSION_MASK) >> TUNING_VERSION_SHIFT;
   if (savedTuningVersion < CURRENT_TUNING_VERSION)
   {
-    // One-time tuning migration: preserve calibration, route policy,
-    // thresholds and record layout; replace only the unstable motion tuning.
-    kpX100 = 30;
-    kdX100 = 15;
-    baseSpeed = 130;
+    // One-time replacement of the broken controller's tuning. Calibration,
+    // route policy, threshold, box mode and the packed record remain intact.
+    kpX100 = 20;
+    kdX100 = 50;
+    baseSpeed = 100;
     record.kp = kpX100;
     record.kd = kdX100;
     record.speed = baseSpeed;

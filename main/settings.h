@@ -5,15 +5,13 @@
 #include "config.h"
 
 
-// Route bits are deliberately powers of two so a frozen availability mask
-// fits in one byte.
 enum RouteDirection : uint8_t
 {
   ROUTE_NONE = 0,
-  ROUTE_LEFT = 1 << 0,
-  ROUTE_STRAIGHT = 1 << 1,
-  ROUTE_RIGHT = 1 << 2,
-  ROUTE_U_TURN = 1 << 3
+  ROUTE_LEFT,
+  ROUTE_STRAIGHT,
+  ROUTE_RIGHT,
+  ROUTE_U_TURN
 };
 
 
@@ -29,15 +27,15 @@ enum RoutePriorityOrder : uint8_t
 };
 
 
-// KP default: 0.30. Controls present line-error response. Increase if steering
+// KP default: 0.20. Controls present line-error response. Increase if steering
 // is weak; decrease if the robot oscillates.
-// KD default: 0.15. Controls damping from error change. Increase to suppress
+// KD default: 0.50. Controls damping from error change. Increase to suppress
 // overshoot; decrease if motor commands become noisy or twitchy.
-// Both use fixed-point hundredths: 30 means 0.30.
+// Both use fixed-point hundredths: 20 means 0.20.
 extern uint8_t kpX100;
 extern uint8_t kdX100;
 
-// Default: 130 PWM. Controls normal PD speed. Increase for more speed after
+// Default: 100 PWM. Controls normal PD speed. Increase for more speed after
 // the robot is stable; decrease if it overshoots or loses the line.
 extern uint8_t baseSpeed;
 
@@ -50,7 +48,7 @@ extern uint16_t sensorThreshold;
 extern uint8_t routePriority;
 
 // Default: OFF. When enabled, RUN treats broad black regions as start/finish
-// boxes and disables inverse-line detection for the entire run.
+// boxes for the entire run.
 extern bool boxMode;
 
 extern bool sensorCalibrationValid;
